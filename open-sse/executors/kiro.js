@@ -1197,8 +1197,4 @@ export class KiroExecutor extends BaseExecutor {
   }
 }
 
-/**
- * Parse AWS EventStream frame
- */
-
 export default KiroExecutor;
