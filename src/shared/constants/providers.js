@@ -3,10 +3,21 @@ import REGISTRY from "open-sse/providers/registry/index.js";
 import { RISK_NOTICE } from "@/shared/constants/providersDisplay";
 
 const MEDIA_ENTRY_KEYS = [
-  "serviceKinds", "ttsConfig", "sttConfig", "embeddingConfig",
-  "imageConfig", "imageToTextConfig", "videoConfig", "musicConfig",
-  "searchViaChat", "searchConfig", "fetchConfig", "credentialFallback",
-  "modelsFetcher", "mediaPriority", "hiddenKinds",
+  "serviceKinds",
+  "ttsConfig",
+  "sttConfig",
+  "embeddingConfig",
+  "imageConfig",
+  "imageToTextConfig",
+  "videoConfig",
+  "musicConfig",
+  "searchViaChat",
+  "searchConfig",
+  "fetchConfig",
+  "credentialFallback",
+  "modelsFetcher",
+  "mediaPriority",
+  "hiddenKinds",
 ];
 
 // Build provider UI object from registry entry
@@ -17,7 +28,8 @@ function buildProviderEntry(r) {
     if (r[k] !== undefined) mediaFields[k] = r[k];
   }
   const display = { ...(r.display || {}) };
-  if (display.deprecationNotice === "RISK_NOTICE") display.deprecationNotice = RISK_NOTICE;
+  if (display.deprecationNotice === "RISK_NOTICE")
+    display.deprecationNotice = RISK_NOTICE;
   return {
     ...display,
     id: r.id,
@@ -27,7 +39,9 @@ function buildProviderEntry(r) {
     ...(r.priority !== undefined ? { priority: r.priority } : {}),
     ...(r.hasFree ? { hasFree: true } : {}),
     ...(r.thinkingConfig ? { thinkingConfig: r.thinkingConfig } : {}),
-    ...(r.regions ? { regions: r.regions, defaultRegion: r.defaultRegion } : {}),
+    ...(r.regions
+      ? { regions: r.regions, defaultRegion: r.defaultRegion }
+      : {}),
     ...(r.hasProviderSpecificData ? { hasProviderSpecificData: true } : {}),
     ...(r.noAuth ? { noAuth: true } : {}),
     ...(r.passthroughModels ? { passthroughModels: true } : {}),
@@ -35,12 +49,19 @@ function buildProviderEntry(r) {
     ...(r.authModes ? { authModes: r.authModes } : {}),
     ...(r.authType ? { authType: r.authType } : {}),
     ...(r.authHint ? { authHint: r.authHint } : {}),
+    ...(r.apiKeyOptionalWith
+      ? { apiKeyOptionalWith: r.apiKeyOptionalWith }
+      : {}),
   };
 }
 
-const byCategory = (cat) => Object.fromEntries(
-  REGISTRY.filter(r => r.category === cat).map(r => [r.id, buildProviderEntry(r)])
-);
+const byCategory = (cat) =>
+  Object.fromEntries(
+    REGISTRY.filter((r) => r.category === cat).map((r) => [
+      r.id,
+      buildProviderEntry(r),
+    ]),
+  );
 
 export const FREE_PROVIDERS = byCategory("free");
 export const FREE_TIER_PROVIDERS = byCategory("freeTier");
@@ -54,12 +75,12 @@ export const THINKING_CONFIG = {
   extended: {
     options: ["auto", "on", "off"],
     defaultMode: "auto",
-    defaultBudgetTokens: 10000
+    defaultBudgetTokens: 10000,
   },
   effort: {
     options: ["auto", "none", "low", "medium", "high"],
-    defaultMode: "auto"
-  }
+    defaultMode: "auto",
+  },
 };
 
 export const OAUTH_PROVIDERS = byCategory("oauth");
@@ -70,15 +91,60 @@ export const WEB_COOKIE_PROVIDERS = byCategory("webCookie");
 
 // Media provider kinds — each kind maps to a route and endpoint config
 export const MEDIA_PROVIDER_KINDS = [
-  { id: "embedding",   label: "Embedding",      icon: "data_array",        endpoint: { method: "POST", path: "/v1/embeddings" } },
-  { id: "image",       label: "Text to Image",  icon: "brush",             endpoint: { method: "POST", path: "/v1/images/generations" } },
-  { id: "imageToText", label: "Image to Text",  icon: "image_search",      endpoint: { method: "POST", path: "/v1/images/understanding" } },
-  { id: "tts",         label: "Text To Speech", icon: "record_voice_over", endpoint: { method: "POST", path: "/v1/audio/speech" } },
-  { id: "stt",         label: "Speech To Text", icon: "mic",               endpoint: { method: "POST", path: "/v1/audio/transcriptions" } },
-  { id: "webSearch",   label: "Web Search",     icon: "travel_explore",    endpoint: { method: "POST", path: "/v1/search" } },
-  { id: "webFetch",    label: "Web Fetch",      icon: "language",          endpoint: { method: "POST", path: "/v1/web/fetch" } },
-  { id: "video",       label: "Video",          icon: "movie",             endpoint: { method: "POST", path: "/v1/videos/generations" } },
-  { id: "music",       label: "Music",          icon: "music_note",        endpoint: { method: "POST", path: "/v1/audio/music" } },
+  {
+    id: "embedding",
+    label: "Embedding",
+    icon: "data_array",
+    endpoint: { method: "POST", path: "/v1/embeddings" },
+  },
+  {
+    id: "image",
+    label: "Text to Image",
+    icon: "brush",
+    endpoint: { method: "POST", path: "/v1/images/generations" },
+  },
+  {
+    id: "imageToText",
+    label: "Image to Text",
+    icon: "image_search",
+    endpoint: { method: "POST", path: "/v1/images/understanding" },
+  },
+  {
+    id: "tts",
+    label: "Text To Speech",
+    icon: "record_voice_over",
+    endpoint: { method: "POST", path: "/v1/audio/speech" },
+  },
+  {
+    id: "stt",
+    label: "Speech To Text",
+    icon: "mic",
+    endpoint: { method: "POST", path: "/v1/audio/transcriptions" },
+  },
+  {
+    id: "webSearch",
+    label: "Web Search",
+    icon: "travel_explore",
+    endpoint: { method: "POST", path: "/v1/search" },
+  },
+  {
+    id: "webFetch",
+    label: "Web Fetch",
+    icon: "language",
+    endpoint: { method: "POST", path: "/v1/web/fetch" },
+  },
+  {
+    id: "video",
+    label: "Video",
+    icon: "movie",
+    endpoint: { method: "POST", path: "/v1/videos/generations" },
+  },
+  {
+    id: "music",
+    label: "Music",
+    icon: "music_note",
+    endpoint: { method: "POST", path: "/v1/audio/music" },
+  },
 ];
 
 export const OPENAI_COMPATIBLE_PREFIX = "openai-compatible-";
@@ -86,19 +152,34 @@ export const ANTHROPIC_COMPATIBLE_PREFIX = "anthropic-compatible-";
 export const CUSTOM_EMBEDDING_PREFIX = "custom-embedding-";
 
 export function isOpenAICompatibleProvider(providerId) {
-  return typeof providerId === "string" && providerId.startsWith(OPENAI_COMPATIBLE_PREFIX);
+  return (
+    typeof providerId === "string" &&
+    providerId.startsWith(OPENAI_COMPATIBLE_PREFIX)
+  );
 }
 
 export function isAnthropicCompatibleProvider(providerId) {
-  return typeof providerId === "string" && providerId.startsWith(ANTHROPIC_COMPATIBLE_PREFIX);
+  return (
+    typeof providerId === "string" &&
+    providerId.startsWith(ANTHROPIC_COMPATIBLE_PREFIX)
+  );
 }
 
 export function isCustomEmbeddingProvider(providerId) {
-  return typeof providerId === "string" && providerId.startsWith(CUSTOM_EMBEDDING_PREFIX);
+  return (
+    typeof providerId === "string" &&
+    providerId.startsWith(CUSTOM_EMBEDDING_PREFIX)
+  );
 }
 
 // All providers (combined)
-export const AI_PROVIDERS = { ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...OAUTH_PROVIDERS, ...APIKEY_PROVIDERS, ...WEB_COOKIE_PROVIDERS };
+export const AI_PROVIDERS = {
+  ...FREE_PROVIDERS,
+  ...FREE_TIER_PROVIDERS,
+  ...OAUTH_PROVIDERS,
+  ...APIKEY_PROVIDERS,
+  ...WEB_COOKIE_PROVIDERS,
+};
 
 // Auth methods
 export const AUTH_METHODS = {
@@ -152,14 +233,18 @@ export function getProvidersByKind(kind) {
       if (p.hiddenKinds?.includes(kind)) return false;
       return true;
     })
-    .sort((a, b) => (a.priority ?? a.mediaPriority ?? 999) - (b.priority ?? b.mediaPriority ?? 999));
+    .sort(
+      (a, b) =>
+        (a.priority ?? a.mediaPriority ?? 999) -
+        (b.priority ?? b.mediaPriority ?? 999),
+    );
 }
 
 // Derive từ registry features flags
-export const USAGE_SUPPORTED_PROVIDERS = REGISTRY
-  .filter(r => r.features?.usage)
-  .map(r => r.id);
+export const USAGE_SUPPORTED_PROVIDERS = REGISTRY.filter(
+  (r) => r.features?.usage,
+).map((r) => r.id);
 
-export const USAGE_APIKEY_PROVIDERS = REGISTRY
-  .filter(r => r.features?.usageApikey)
-  .map(r => r.id);
+export const USAGE_APIKEY_PROVIDERS = REGISTRY.filter(
+  (r) => r.features?.usageApikey,
+).map((r) => r.id);

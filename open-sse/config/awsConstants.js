@@ -21,9 +21,29 @@ export const AWS_CREDENTIAL_MODE = {
 // request cannot be signed with a key that dies mid-stream.
 export const AWS_CREDENTIAL_REFRESH_LEAD_MS = 5 * 60 * 1000;
 
-// Credentials with no declared expiry (long-lived IAM keys) still get re-checked
-// occasionally so a rotated key is not cached for the life of the process.
-export const AWS_STATIC_CREDENTIAL_TTL_MS = 60 * 60 * 1000;
+// A profile can resolve to credentials with no declared expiry — `fromIni` returns none for a
+// plain aws_access_key_id/aws_secret_access_key profile in ~/.aws/credentials, which is common.
+// Those still must not be pinned for the life of the process, but treating them as instantly
+// stale re-read and re-parsed ~/.aws on every single request. This floor bounds both.
+export const AWS_CREDENTIAL_NO_EXPIRY_TTL_MS = 60 * 1000;
+
+// An AWS region is interpolated into the request hostname, so it is validated rather than
+// trusted: "evil.com/x" would otherwise resolve the host to "bedrock-runtime.evil.com" and
+// ship the signed request, its body and the session token to an attacker-chosen origin.
+// Real regions are lowercase alphanumerics and hyphens, e.g. "us-east-1", "ap-southeast-3".
+export const AWS_REGION_PATTERN = /^[a-z0-9][a-z0-9-]{0,30}$/;
+
+// A profile name is handed to the AWS SDK, which will follow `source_profile` role chains and
+// run a `credential_process` subprocess if the named profile declares one. It is validated for
+// the same reason as the region: it arrives as unschema'd providerSpecificData, so it should not
+// be an arbitrary string reaching a credential resolver. AWS profile names allow word chars,
+// dots, dashes and (for `sso-session`-style names) colons.
+export const AWS_PROFILE_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+// How long to wait for a profile/SSO resolution before giving up. Without a bound, one hung
+// GetRoleCredentials or ~/.aws read blocks every request on that profile forever, because they
+// all await the same in-flight promise.
+export const AWS_CREDENTIAL_RESOLVE_TIMEOUT_MS = 10 * 1000;
 
 // Package name for error messages only. The actual `import()` in shared/awsCredentials.js has
 // to spell this out as a literal, or Next's output tracing cannot see it and omits the package
@@ -42,6 +62,14 @@ export const BEDROCK = {
   // Bedrock frames streaming responses as AWS EventStream; each chunk payload is
   // {"bytes": "<base64 of one Anthropic streaming event>"}.
   chunkEventName: "chunk",
+  // This executor speaks the Anthropic Messages format only. passthroughModels is on so that any
+  // Anthropic inference profile works regardless of region, but a Nova/Llama/Titan id would sail
+  // through and then die mid-stream on a chunk with no `type` — after the call was already paid
+  // for. Matching on the model family rejects those upfront instead.
+  anthropicModelPattern: /(^|[./])anthropic\./,
+  // Anthropic closes a well-formed stream with this event. Tracking it is what lets us tell a
+  // finished answer from an upstream that hung up cleanly halfway through one.
+  terminalEventType: "message_stop",
 };
 
 // === AWS EventStream framing ===
