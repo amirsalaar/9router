@@ -7,7 +7,69 @@ vi.mock("../../open-sse/utils/proxyFetch.js", async (importOriginal) => ({
 }));
 
 import { proxyAwareFetch } from "../../open-sse/utils/proxyFetch.js";
-import { BedrockExecutor } from "../../open-sse/executors/bedrock.js";
+import { BedrockExecutor, probeBedrockCredentials } from "../../open-sse/executors/bedrock.js";
+
+const STATIC_CREDS = {
+  apiKey: "secret-access-key",
+  providerSpecificData: { accessKeyId: "AKIAEXAMPLE", region: "us-east-1" },
+};
+
+const awsResponse = (status, { errorType, message } = {}) =>
+  new Response(JSON.stringify(message ? { message } : {}), {
+    status,
+    headers: errorType ? { "x-amzn-errortype": `${errorType}:http://internal.amazon.com/coral/` } : {},
+  });
+
+describe("probeBedrockCredentials", () => {
+  it("signs a ListFoundationModels GET on the control-plane host and accepts a 200", async () => {
+    const fetchFn = vi.fn(async () => awsResponse(200));
+
+    await expect(probeBedrockCredentials(STATIC_CREDS, fetchFn)).resolves.toEqual({ valid: true, error: null });
+
+    const [url, init] = fetchFn.mock.calls[0];
+    expect(url).toBe("https://bedrock.us-east-1.amazonaws.com/foundation-models");
+    expect(init.method).toBe("GET");
+    expect(init.redirect).toBe("error");
+    expect(init.headers.Authorization).toMatch(/Credential=AKIAEXAMPLE\/\d{8}\/us-east-1\/bedrock\/aws4_request/);
+  });
+
+  it("treats AccessDeniedException as valid: the signature was accepted, only listing is not allowed", async () => {
+    const fetchFn = vi.fn(async () => awsResponse(403, { errorType: "AccessDeniedException" }));
+    await expect(probeBedrockCredentials(STATIC_CREDS, fetchFn)).resolves.toEqual({ valid: true, error: null });
+  });
+
+  it("rejects credentials AWS does not recognise, naming the AWS error", async () => {
+    const fetchFn = vi.fn(async () =>
+      awsResponse(403, { errorType: "UnrecognizedClientException", message: "The security token included in the request is invalid." }),
+    );
+
+    const result = await probeBedrockCredentials(STATIC_CREDS, fetchFn);
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("UnrecognizedClientException");
+    expect(result.error).toContain("security token included in the request is invalid");
+  });
+
+  it("reports incomplete static keys without calling AWS", async () => {
+    const fetchFn = vi.fn();
+    const result = await probeBedrockCredentials({ apiKey: "secret-only", providerSpecificData: {} }, fetchFn);
+
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/static credentials are incomplete/);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("refuses a region that would redirect the signed probe to another host", async () => {
+    const fetchFn = vi.fn();
+    const result = await probeBedrockCredentials(
+      { ...STATIC_CREDS, providerSpecificData: { ...STATIC_CREDS.providerSpecificData, region: "evil.com/x" } },
+      fetchFn,
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/Invalid AWS region/);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+});
 
 describe("BedrockExecutor.execute request-log headers", () => {
   beforeEach(() => proxyAwareFetch.mockReset());

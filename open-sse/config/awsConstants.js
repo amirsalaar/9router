@@ -80,6 +80,14 @@ export const BEDROCK = {
   // Anthropic closes a well-formed stream with this event. Tracking it is what lets us tell a
   // finished answer from an upstream that hung up cleanly halfway through one.
   terminalEventType: "message_stop",
+  // Credential probe for the dashboard's validate and Test paths: ListFoundationModels on the
+  // control-plane host (bedrock.<region>, not bedrock-runtime.<region>), signed as "bedrock".
+  probePath: "foundation-models",
+  // AWS names the failure in this response header, e.g. "AccessDeniedException:<namespace>".
+  errorTypeHeader: "x-amzn-errortype",
+  // Signature accepted, action refused: the credentials are genuine but this identity may not
+  // list models, which says nothing about whether it may invoke them.
+  accessDeniedErrorType: "AccessDeniedException",
 };
 
 // === AWS EventStream framing ===
