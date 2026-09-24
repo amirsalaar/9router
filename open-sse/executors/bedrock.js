@@ -401,4 +401,43 @@ function redactSignedHeaders(headers) {
   return redacted;
 }
 
+/**
+ * Check a Bedrock connection with a signed ListFoundationModels call, for the dashboard's
+ * validate and Test paths. `fetchFn` is the caller's fetch, so each path keeps its own proxy
+ * handling. Resolution failures (incomplete keys, an expired SSO session, a bad region) come
+ * back as the error, since they are exactly what the user needs to fix.
+ *
+ * @returns {Promise<{valid: boolean, error: string|null}>}
+ */
+export async function probeBedrockCredentials(credentials, fetchFn) {
+  let resolved;
+  try {
+    resolved = await resolveAwsCredentials(credentials);
+  } catch (error) {
+    return { valid: false, error: error.message };
+  }
+
+  // resolveAwsCredentials validated the region, so it is safe in the hostname.
+  const url = `https://bedrock.${resolved.region}.amazonaws.com/${BEDROCK.probePath}`;
+  const headers = signAwsRequest({
+    method: "GET",
+    url,
+    headers: { Accept: "application/json" },
+    region: resolved.region,
+    service: BEDROCK.service,
+    credentials: resolved,
+  });
+  const res = await fetchFn(url, { method: "GET", headers, redirect: "error" });
+  if (res.ok) return { valid: true, error: null };
+
+  const errorType = (res.headers.get(BEDROCK.errorTypeHeader) || "").split(":")[0];
+  if (errorType === BEDROCK.accessDeniedErrorType) return { valid: true, error: null };
+
+  const message = (await res.json().catch(() => null))?.message;
+  return {
+    valid: false,
+    error: `AWS rejected the credentials (${errorType || `HTTP ${res.status}`})${message ? `: ${message}` : ""}`,
+  };
+}
+
 export default BedrockExecutor;
