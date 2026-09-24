@@ -273,8 +273,16 @@ export class BedrockExecutor extends BaseExecutor {
               return fail(exceptionType, message);
             }
 
-            if (event.headers[":event-type"] !== BEDROCK.chunkEventName)
+            // InvokeModelWithResponseStream defines no other event type today, so an unknown one
+            // means AWS extended the protocol. Failing would break every stream over what may be
+            // a harmless metadata event; skipping silently could hide lost content. Say so.
+            if (event.headers[":event-type"] !== BEDROCK.chunkEventName) {
+              log?.warn?.(
+                "BEDROCK",
+                `skipped unrecognised EventStream event type ${JSON.stringify(event.headers[":event-type"])}`,
+              );
               continue;
+            }
 
             // A CRC-valid chunk with no payload means the protocol changed under us. Dropping
             // it would silently lose content, so treat it as a failure.
