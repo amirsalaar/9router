@@ -1,6 +1,6 @@
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
-import { AWS_EVENTSTREAM, BEDROCK } from "../config/awsConstants.js";
+import { AWS_EVENTSTREAM, AWS_SIGV4, BEDROCK } from "../config/awsConstants.js";
 import {
   resolveAwsCredentials,
   resolveRegion,
@@ -136,9 +136,14 @@ export class BedrockExecutor extends BaseExecutor {
       proxyOptions,
     );
 
+    // The returned headers only feed chatCore's request logger, which writes them to disk
+    // unmasked. The session token is a credential and the signature can replay this request,
+    // so both are redacted there; the key id and signed-header list stay for debugging.
+    const loggedHeaders = redactSignedHeaders(headers);
+
     // Errors and non-streaming calls are already JSON the claude translator understands.
     if (!response.ok || !stream || !response.body) {
-      return { response, url, headers, transformedBody };
+      return { response, url, headers: loggedHeaders, transformedBody };
     }
 
     return {
@@ -148,7 +153,7 @@ export class BedrockExecutor extends BaseExecutor {
         headers: { ...SSE_HEADERS },
       }),
       url,
-      headers,
+      headers: loggedHeaders,
       transformedBody,
     };
   }
@@ -382,6 +387,18 @@ export class BedrockExecutor extends BaseExecutor {
       },
     });
   }
+}
+
+/** Copy of signed headers that is safe to write to a request log. */
+function redactSignedHeaders(headers) {
+  const redacted = {
+    ...headers,
+    Authorization: headers.Authorization.replace(/Signature=[0-9a-f]+/, "Signature=<redacted>"),
+  };
+  if (redacted[AWS_SIGV4.securityTokenHeader]) {
+    redacted[AWS_SIGV4.securityTokenHeader] = "<redacted>";
+  }
+  return redacted;
 }
 
 export default BedrockExecutor;
