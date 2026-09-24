@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { PROVIDERS } from "../../open-sse/config/providers.js";
 import {
@@ -192,6 +192,30 @@ describe("Bedrock EventStream to Claude SSE", () => {
     );
 
     expect(sse).toContain('"text":"split"');
+  });
+
+  it("skips an unrecognised event type visibly: it warns and the stream still completes", async () => {
+    const unknown = encodeEventFrame(
+      { ":event-type": "metadata", ":message-type": "event" },
+      { anything: true },
+    );
+    const log = { warn: vi.fn(), error: vi.fn() };
+
+    const sse = await readAll(
+      executor.eventStreamToSse(
+        streamOf(
+          chunkFrame({ type: "message_start", message: { id: "msg_1" } }),
+          unknown,
+          chunkFrame({ type: "message_stop" }),
+        ),
+        log,
+      ),
+    );
+
+    expect(log.warn).toHaveBeenCalledWith("BEDROCK", expect.stringContaining('"metadata"'));
+    expect(log.error).not.toHaveBeenCalled();
+    expect(sse).not.toContain("event: error");
+    expect(sse).toContain("event: message_stop");
   });
 
   it("surfaces an in-band exception frame instead of ending the stream silently", async () => {
