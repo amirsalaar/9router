@@ -9,6 +9,7 @@ import { buildUsage } from "../concerns/usage.js";
 import { fallbackToolCallId } from "../concerns/toolCall.js";
 import { reasoningDelta, extractReasoningText } from "../concerns/reasoning.js";
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM, OPENAI_FINISH, MODEL_FALLBACK } from "../schema/index.js";
+import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES } from "../../config/errorConfig.js";
 
 /**
  * Translate OpenAI chunk to Responses API events
@@ -18,6 +19,10 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
   if (!chunk) {
     return flushEvents(state);
   }
+
+  // An in-band upstream failure has no choices. Left to the checks below it would be dropped
+  // and the stream would end in response.completed, reporting a truncated answer as success.
+  if (chunk.error) return failResponse(state, chunk.error);
 
   // Responses clients read token usage only from response.completed, and Codex compacts its
   // history from it. Chat Completions sends usage on the finish chunk or in a trailing chunk
@@ -419,6 +424,34 @@ function sendCompleted(state, emit) {
       }
     });
   }
+}
+
+// Terminal response.failed for an in-band upstream error. codex-api reads response.error as
+// optional strings (type, code, message) and classifies the failure by `code`, so each field is
+// a string. Setting completedSent stops flush from also reporting the response as completed.
+function failResponse(state, error) {
+  if (state.completedSent) return [];
+  state.completedSent = true;
+  const code = String(error.code || error.type || ERROR_TYPES[500].code);
+  return [{
+    event: "response.failed",
+    data: {
+      type: "response.failed",
+      sequence_number: ++state.seq,
+      response: {
+        id: state.responseId,
+        object: "response",
+        created_at: state.created,
+        status: "failed",
+        background: false,
+        error: {
+          code,
+          message: String(error.message || DEFAULT_ERROR_MESSAGES[500]),
+          type: String(error.type || code),
+        },
+      },
+    },
+  }];
 }
 
 function flushEvents(state) {
