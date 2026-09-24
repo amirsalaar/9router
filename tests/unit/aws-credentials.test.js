@@ -412,7 +412,7 @@ describe("profile resolution bounds and validation", () => {
   it("rejects a profile name that is not a plausible AWS profile", async () => {
     // providerSpecificData has no schema, and the SDK will follow source_profile chains and run
     // a credential_process subprocess for whatever profile it is handed.
-    for (const profile of ["../../etc/passwd", "a b", "x;y", "$(whoami)", "a".repeat(65)]) {
+    for (const profile of ["../../etc/passwd", "a/b", "x;y", "$(whoami)", "a`b`", "a".repeat(65)]) {
       await expect(
         resolveAwsCredentials({ providerSpecificData: { profile } }),
       ).rejects.toThrow(/Invalid AWS profile name/);
@@ -426,7 +426,9 @@ describe("profile resolution bounds and validation", () => {
       sessionToken: "t",
       expiration: new Date(Date.now() + 3_600_000),
     }));
-    for (const profile of ["default", "my-sso-profile", "acct_1.prod", "sso:role"]) {
+    // Includes what the SDK's ini parser resolves beyond the basics: `@ + %` in `[profile NAME]`
+    // sections, and spaces in a plain `[NAME]` section of ~/.aws/credentials.
+    for (const profile of ["default", "my-sso-profile", "acct_1.prod", "sso:role", "user@example.com", "team+ops", "50%", "my work"]) {
       clearAwsCredentialCache();
       await expect(
         resolveAwsCredentials(

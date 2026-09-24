@@ -136,8 +136,8 @@ async function readProfileCredentials(
   if (typeof profile !== "string" || !AWS_PROFILE_PATTERN.test(profile)) {
     throw new Error(
       `Invalid AWS profile name ${JSON.stringify(profile)}. Use the profile's name as it ` +
-        "appears in ~/.aws/config: letters, digits, underscore, dot, colon or hyphen, " +
-        "up to 64 characters.",
+        "appears in ~/.aws/config or ~/.aws/credentials: letters, digits, spaces and " +
+        "_ - @ + . % :, up to 64 characters.",
     );
   }
 

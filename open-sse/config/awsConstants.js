@@ -36,9 +36,11 @@ export const AWS_REGION_PATTERN = /^[a-z0-9][a-z0-9-]{0,30}$/;
 // A profile name is handed to the AWS SDK, which will follow `source_profile` role chains and
 // run a `credential_process` subprocess if the named profile declares one. It is validated for
 // the same reason as the region: it arrives as unschema'd providerSpecificData, so it should not
-// be an arbitrary string reaching a credential resolver. AWS profile names allow word chars,
-// dots, dashes and (for `sso-session`-style names) colons.
-export const AWS_PROFILE_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/;
+// be an arbitrary string reaching a credential resolver. The characters follow what the SDK
+// itself resolves: its ini parser takes `[profile NAME]` names of word chars and - @ + . % : /,
+// and a plain `[NAME]` section in ~/.aws/credentials may also contain spaces. `/` is left out:
+// the name is only a lookup key, but a path-shaped one is never a real profile.
+export const AWS_PROFILE_PATTERN = /^[\w@+.%: -]{1,64}$/;
 
 // How long to wait for a profile/SSO resolution before giving up. Without a bound, one hung
 // GetRoleCredentials or ~/.aws read blocks every request on that profile forever, because they
