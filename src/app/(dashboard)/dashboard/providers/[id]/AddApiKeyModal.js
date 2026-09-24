@@ -99,9 +99,13 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   // One place decides whether the credential requirement is met. The button's disabled state and
   // handleSubmit's early return both read it; encoding the rule twice is what let Save look
   // clickable while silently doing nothing for profile-only Bedrock connections.
-  const apiKeySatisfied = () =>
-    !!formData.apiKey ||
-    !!(apiKeyOptionalWith && buildProviderSpecificData()?.[apiKeyOptionalWith]);
+  const apiKeySatisfied = () => {
+    const psd = buildProviderSpecificData();
+    if (apiKeyOptionalWith && psd?.[apiKeyOptionalWith]) return true;
+    // AWS static keys are a pair: a secret alone saves a connection that can never sign.
+    if (usesAwsCredentialForm) return !!formData.apiKey && !!psd?.accessKeyId;
+    return !!formData.apiKey;
+  };
 
   const handleValidate = async () => {
     setValidating(true);
@@ -293,7 +297,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
               className="flex-1"
             />
             <div className="pt-6">
-              <Button onClick={handleValidate} disabled={!formData.apiKey || validating || saving} variant="secondary">
+              <Button onClick={handleValidate} disabled={!apiKeySatisfied() || validating || saving} variant="secondary">
                 {validating ? "Checking..." : "Check"}
               </Button>
             </div>
@@ -396,6 +400,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
               />
               <Input
                 label="Session Token (only for temporary ASIA… keys)"
+                type="password"
                 value={bedrockData.sessionToken}
                 onChange={(e) => setBedrockData({ ...bedrockData, sessionToken: e.target.value })}
                 placeholder="FwoGZXIvYXdz..."
