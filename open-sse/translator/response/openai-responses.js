@@ -18,8 +18,16 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
   if (!chunk) {
     return flushEvents(state);
   }
-  
-  if (!chunk.choices?.length) return [];
+
+  // Responses clients read token usage only from response.completed, and Codex compacts its
+  // history from it. Chat Completions sends usage on the finish chunk or in a trailing chunk
+  // with no choices (stream_options.include_usage), so capture it wherever it arrives.
+  if (hasReportableUsage(chunk.usage)) state.responsesUsage = chunk.usage;
+
+  // A trailing usage-only chunk is what a finished-but-pending response is waiting for.
+  if (!chunk.choices?.length) {
+    return state.completionPending && state.responsesUsage ? flushEvents(state) : [];
+  }
   
   const events = [];
   const nextSeq = () => ++state.seq;
@@ -112,7 +120,10 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     for (const i in state.msgItemAdded) closeMessage(state, emit, i);
     closeReasoning(state, emit);
     for (const i in state.funcCallIds) closeToolCall(state, emit, i);
-    sendCompleted(state, emit);
+    // Codex stops reading at response.completed, so usage sent after it is lost. Without usage
+    // yet, hold the completion for the trailing usage chunk; flush sends it at stream end.
+    if (state.responsesUsage) sendCompleted(state, emit);
+    else state.completionPending = true;
   }
 
   return events;
@@ -365,9 +376,36 @@ function closeToolCall(state, emit, idx) {
   }
 }
 
+// Many providers attach null or zeroed usage to every chunk. Accepting a placeholder would
+// complete the response before the real counts arrive.
+function hasReportableUsage(usage) {
+  return Number.isInteger(usage?.prompt_tokens)
+    && Number.isInteger(usage?.completion_tokens)
+    && usage.prompt_tokens + usage.completion_tokens > 0;
+}
+
+// Chat Completions usage → Responses usage, the inverse of openaiResponsesToOpenAIResponse's
+// mapping below. Codex fails the whole turn if response.completed does not parse, and it
+// requires each of these fields as an integer, so details are only passed on when they are.
+function toResponsesUsage(usage) {
+  if (!usage) return null;
+  const cached = usage.prompt_tokens_details?.cached_tokens;
+  const reasoning = usage.completion_tokens_details?.reasoning_tokens;
+  return {
+    input_tokens: usage.prompt_tokens,
+    output_tokens: usage.completion_tokens,
+    total_tokens: Number.isInteger(usage.total_tokens)
+      ? usage.total_tokens
+      : usage.prompt_tokens + usage.completion_tokens,
+    ...(Number.isInteger(cached) ? { input_tokens_details: { cached_tokens: cached } } : {}),
+    ...(Number.isInteger(reasoning) ? { output_tokens_details: { reasoning_tokens: reasoning } } : {}),
+  };
+}
+
 function sendCompleted(state, emit) {
   if (!state.completedSent) {
     state.completedSent = true;
+    const usage = toResponsesUsage(state.responsesUsage);
     emit("response.completed", {
       type: "response.completed",
       response: {
@@ -376,7 +414,8 @@ function sendCompleted(state, emit) {
         created_at: state.created,
         status: "completed",
         background: false,
-        error: null
+        error: null,
+        ...(usage ? { usage } : {})
       }
     });
   }
