@@ -10,8 +10,10 @@ import { LEVEL_TO_BUDGET, budgetToLevel, effortToBudget, effortToThinkingLevel }
 // Map a target wire-format to its native thinking format (when capability has none).
 const FORMAT_TO_NATIVE = {
   openai: "openai",
-  "openai-responses": "openai",
-  "openai-response": "openai",
+  // The Responses wire takes `reasoning: { effort }`; sending the Chat Completions
+  // `reasoning_effort` there is rejected ("this parameter has moved to reasoning.effort").
+  "openai-responses": "openai-responses",
+  "openai-response": "openai-responses",
   codex: "openai",
   claude: "claude-budget",
   gemini: "gemini-budget",
@@ -129,17 +131,24 @@ const NATIVE_ONLY_FORMATS = new Set(["gemini-level", "gemini-budget", "claude-bu
 
 function resolveFormat(targetFormat, model, provider) {
   if (targetFormat === "commandcode") return "commandcode";
+  const isResponsesWire = targetFormat === "openai-responses" || targetFormat === "openai-response";
+  // "openai" names the OpenAI family's effort knob, not the wire that carries it. On the
+  // Responses wire the same knob is `reasoning.effort`, so a declared "openai" format has
+  // to be upgraded — otherwise this overwrites the translator's correct `reasoning` with a
+  // top-level reasoning_effort the endpoint rejects. Provider-native formats (zai,
+  // deepseek, …) name their own field and are left alone.
+  const forWire = (fmt) => (fmt === "openai" && isResponsesWire ? "openai-responses" : fmt);
   const providerFmt = provider ? PROVIDERS[provider]?.thinkingFormat : null;
-  if (providerFmt) return providerFmt;
+  if (providerFmt) return forWire(providerFmt);
   const caps = getCapabilitiesForModel(provider, model);
-  const isOpenAIWire = targetFormat === "openai" || targetFormat === "openai-responses";
+  const isOpenAIWire = targetFormat === "openai" || isResponsesWire;
   if (caps.thinkingFormat && !(isOpenAIWire && NATIVE_ONLY_FORMATS.has(caps.thinkingFormat))) {
     // Muse (Meta) strict Responses API rejects top-level reasoning_effort and
     // requires nested reasoning: { effort, summary }. Other upstreams keep Chat-shaped effort.
     if (provider === "muse" && targetFormat === "openai-responses") {
       return "openai-responses";
     }
-    return caps.thinkingFormat;
+    return forWire(caps.thinkingFormat);
   }
   return FORMAT_TO_NATIVE[targetFormat] || "openai";
 }
@@ -256,7 +265,7 @@ function stripAll(body) {
 }
 
 // Apply unified thinking config to body in the resolved provider-native format.
-function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
+function applyFormat(fmt, body, cfg, caps, supportedLevels, display, summary) {
   const none = cfg.mode === "none";
   const canDisable = caps.thinkingCanDisable !== false;
   // Model cannot disable thinking → clamp "none" to minimal effort instead.
@@ -280,7 +289,8 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
           ? body.reasoning
           : {};
         body.reasoning = { ...current, effort: normalizeOpenAILevel(level, supportedLevels) };
-        if (!body.reasoning.summary) body.reasoning.summary = "auto";
+        // summary is the client's choice (auto | concise | detailed), so keep it when it was sent
+        if (!body.reasoning.summary) body.reasoning.summary = summary ?? "auto";
       }
       delete body.reasoning_effort;
       break;
@@ -429,7 +439,10 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
   // comes back at all; keep what the client asked for instead of resetting it.
   // An OpenAI-shaped client's ask arrives via the captured intent instead.
   const display = typeof body.thinking?.display === "string" ? body.thinking.display : intent?.display;
+  // Same idea on the Responses wire: `reasoning.summary` is the client's choice and
+  // stripAll() is about to drop it, so capture it before rebuilding the field.
+  const summary = typeof body.reasoning?.summary === "string" ? body.reasoning.summary : undefined;
   stripAll(body);
-  applyFormat(fmt, body, cfg, caps, supportedLevels, display);
+  applyFormat(fmt, body, cfg, caps, supportedLevels, display, summary);
   return body;
 }
