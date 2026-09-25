@@ -217,13 +217,13 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
   if (targetFormat === FORMATS.OPENAI && sourceFormat === FORMATS.OPENAI_RESPONSES) {
     return openAICompletionToResponses(responseBody, customToolNames);
   }
-  // The mirror case: provider answered on the Responses wire, client does not speak
-  // it. Fold output[] into choices[] first, then fall through to the chat-shaped
-  // branches below so claude/gemini/ollama clients convert from one shape only.
+  // The mirror case: provider answered on the Responses wire, client does not speak it.
+  // Fold output[] into choices[] and continue as if the provider had answered in chat shape.
+  // Every branch below keys on the *provider* format, so this is the rail that carries the
+  // client-specific exits (the claude branch next, then the plain-OpenAI return).
   if (targetFormat === FORMATS.OPENAI_RESPONSES && responseBody?.object === "response") {
     responseBody = responsesBodyToOpenAICompletion(responseBody);
     targetFormat = FORMATS.OPENAI;
-    if (targetFormat === sourceFormat) return responseBody;
   }
   if (targetFormat === FORMATS.OPENAI && sourceFormat === FORMATS.CLAUDE) {
     return openAICompletionToClaudeMessage(responseBody);
