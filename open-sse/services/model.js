@@ -128,6 +128,11 @@ const MODEL_PREFIX_PROVIDERS = [
   [/^codex-auto-review$/, "codex"],
   [/^claude-/, "anthropic"],
   [/^gemini-/, "gemini"],
+  // GitHub Copilot uses versioned GPT model IDs (gpt-5.6-luna, gpt-6-astra, etc.)
+  // that do not exist on openai.com. The distinguishing mark is a major version ≥ 5
+  // followed immediately by a dot or hyphen: gpt-5.6-luna ✓, gpt-6-astra ✓,
+  // gpt-4o ✗, gpt-4-turbo ✗. Must precede the generic gpt-* → openai rule.
+  [/^gpt-[56][\.-]/, "github"],
   [/^gpt-/, "openai"],
   [/^o[134]/, "openai"],
   [/^deepseek-/, "openrouter"],
