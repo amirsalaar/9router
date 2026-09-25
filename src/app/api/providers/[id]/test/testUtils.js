@@ -4,7 +4,7 @@ import { testProxyUrl } from "@/lib/network/proxyTest";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
-import { resolveAzureTarget } from "open-sse/executors/azure.js";
+import { resolveAzureTarget, isAzureProbeValid } from "open-sse/executors/azure.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
 import {
@@ -559,8 +559,13 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
             ? { model: deployment, input: "test", max_output_tokens: 16 }
             : { messages: [{ role: "user", content: "test" }], max_completion_tokens: 1 }),
         }, effectiveProxy);
-        const valid = res.status !== 401 && res.status !== 403;
-        return { valid, error: valid ? null : "Invalid API key or Azure configuration" };
+        const valid = isAzureProbeValid(res.status, responses);
+        return {
+          valid,
+          error: valid ? null
+            : responses ? "Invalid API key, or this Azure resource does not expose the v1 /responses surface"
+            : "Invalid API key or Azure configuration",
+        };
       }
       case "openai": {
         const res = await fetchWithConnectionProxy("https://api.openai.com/v1/models", { headers: { Authorization: `Bearer ${connection.apiKey}` } }, effectiveProxy);

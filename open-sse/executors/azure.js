@@ -37,6 +37,22 @@ export function resolveAzureTarget(psd = {}, model = null) {
   };
 }
 
+/**
+ * Did an azure credential probe reach a usable endpoint? Shared by the validate route and the
+ * connection Test button so the two can't drift apart on the rule.
+ *
+ * The chat probe sends max_tokens:1, and a perfectly healthy deployment answers that with 400
+ * ("max_tokens or model output limit was reached"), so that branch can only judge auth. The
+ * Responses probe genuinely returns 200 when the surface exists, so it can be stricter: a
+ * resource without the v1 surface answers 400 ("API version not supported") and an unknown
+ * deployment answers 404 ("DeploymentNotFound"). 429/5xx stay valid — the key is fine, the
+ * resource is busy.
+ */
+export function isAzureProbeValid(status, responses) {
+  if (responses) return ![400, 401, 403, 404].includes(status);
+  return status !== 401 && status !== 403;
+}
+
 export class AzureExecutor extends DefaultExecutor {
   constructor() {
     super("azure");

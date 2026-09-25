@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { AzureExecutor, resolveAzureTarget } from "../../open-sse/executors/azure.js";
+import { AzureExecutor, isAzureProbeValid, resolveAzureTarget } from "../../open-sse/executors/azure.js";
 import { getTargetFormat } from "../../open-sse/services/provider.js";
 
 // Codex sends function tools together with reasoning_effort. Azure rejects that pair on the
@@ -78,6 +78,43 @@ describe("azure Responses API route", () => {
         providerSpecificData: { ...base, deployment: "my-luna-deploy", apiType: "chat" },
       });
       expect(chatBody).toBe(body);
+    });
+  });
+
+  // Probing the right URL is only half the job: the validate route and the Test button also have
+  // to judge the answer. Statuses below are the ones a real resource returned.
+  describe("isAzureProbeValid", () => {
+    it("accepts the 200 a working v1 surface returns", () => {
+      expect(isAzureProbeValid(200, true)).toBe(true);
+    });
+
+    it("rejects the statuses that mean the v1 surface is unusable", () => {
+      // 400 "API version not supported" — resource has no v1 surface.
+      expect(isAzureProbeValid(400, true)).toBe(false);
+      // 404 "DeploymentNotFound" — the deployment named in the body does not exist.
+      expect(isAzureProbeValid(404, true)).toBe(false);
+    });
+
+    // A healthy chat deployment answers the max_tokens:1 probe with 400 ("model output limit
+    // was reached"), so that branch can only judge auth — tightening it would fail every
+    // working azure chat connection.
+    it("keeps the chat probe auth-only", () => {
+      expect(isAzureProbeValid(400, false)).toBe(true);
+      expect(isAzureProbeValid(404, false)).toBe(true);
+    });
+
+    it("rejects auth failures in both modes", () => {
+      for (const responses of [true, false]) {
+        expect(isAzureProbeValid(401, responses)).toBe(false);
+        expect(isAzureProbeValid(403, responses)).toBe(false);
+      }
+    });
+
+    // Quota and outages say nothing about the credentials or the route.
+    it("accepts transient statuses so a busy resource is not marked invalid", () => {
+      for (const status of [429, 500, 503]) {
+        expect(isAzureProbeValid(status, true)).toBe(true);
+      }
     });
   });
 

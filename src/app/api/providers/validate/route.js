@@ -6,7 +6,7 @@ import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS } from
 import { openaiToCommandCodeRequest } from "open-sse/translator/request/openai-to-commandcode.js";
 import { resolveQoderCredentials, resolveQoderModels } from "open-sse/services/qoderModels.js";
 import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
-import { resolveAzureTarget } from "open-sse/executors/azure.js";
+import { resolveAzureTarget, isAzureProbeValid } from "open-sse/executors/azure.js";
 import { normalizeProviderId } from "@/lib/providerNormalization";
 
 // Probe a webSearch/webFetch provider using its searchConfig/fetchConfig.
@@ -231,10 +231,12 @@ export async function POST(request) {
             ? { model: deployment, input: "test", max_output_tokens: 16 }
             : { messages: [{ role: "user", content: "test" }], max_tokens: 1 }),
         });
-        isValid = azureRes.status !== 401 && azureRes.status !== 403;
+        isValid = isAzureProbeValid(azureRes.status, responses);
         return NextResponse.json({
           valid: isValid,
-          error: isValid ? null : "Invalid API key or Azure configuration",
+          error: isValid ? null
+            : responses ? "Invalid API key, or this Azure resource does not expose the v1 /responses surface"
+            : "Invalid API key or Azure configuration",
         });
       }
 
