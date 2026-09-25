@@ -5,6 +5,8 @@ import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS } from "open-sse/config/providers.js";
 import { openaiToCommandCodeRequest } from "open-sse/translator/request/openai-to-commandcode.js";
 import { resolveQoderCredentials, resolveQoderModels } from "open-sse/services/qoderModels.js";
+import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
+import { resolveAzureTarget, isAzureProbeValid } from "open-sse/executors/azure.js";
 import { normalizeProviderId } from "@/lib/providerNormalization";
 
 // Probe a webSearch/webFetch provider using its searchConfig/fetchConfig.
@@ -89,7 +91,11 @@ export async function POST(request) {
     const { apiKey, providerSpecificData } = body;
 
     const isNoAuth = AI_PROVIDERS[provider]?.noAuth === true;
-    if (!provider || (!apiKey && provider !== "ollama-local" && !isNoAuth)) {
+    // Same exemption as the create route: a provider can name a providerSpecificData field
+    // that replaces the API key (Bedrock's `profile`), so validating that setup must not 400.
+    const apiKeySubstitute = AI_PROVIDERS[provider]?.apiKeyOptionalWith;
+    const hasApiKeySubstitute = !!(apiKeySubstitute && providerSpecificData?.[apiKeySubstitute]);
+    if (!provider || (!apiKey && provider !== "ollama-local" && !isNoAuth && !hasApiKeySubstitute)) {
       return NextResponse.json({ error: "Provider and API key required" }, { status: 400 });
     }
 
@@ -207,12 +213,11 @@ export async function POST(request) {
 
       if (provider === "azure") {
         const { providerSpecificData } = body;
-        const endpoint = (providerSpecificData?.azureEndpoint || "").replace(/\/$/, "");
-        const deployment = providerSpecificData?.deployment || "gpt-4";
-        const apiVersion = providerSpecificData?.apiVersion || "2024-10-01-preview";
         const organization = providerSpecificData?.organization;
+        // Probe the same endpoint the router will call, so a Responses-mode
+        // connection on a resource without the v1 surface fails here, not at runtime.
+        const { url, deployment, responses } = resolveAzureTarget(providerSpecificData);
 
-        const url = `${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
         const headers = {
           "api-key": apiKey,
           "Content-Type": "application/json",
@@ -222,16 +227,23 @@ export async function POST(request) {
         const azureRes = await fetch(url, {
           method: "POST",
           headers,
-          body: JSON.stringify({
-            messages: [{ role: "user", content: "test" }],
-            max_tokens: 1,
-          }),
+          body: JSON.stringify(responses
+            ? { model: deployment, input: "test", max_output_tokens: 16 }
+            : { messages: [{ role: "user", content: "test" }], max_tokens: 1 }),
         });
-        isValid = azureRes.status !== 401 && azureRes.status !== 403;
+        isValid = isAzureProbeValid(azureRes.status, responses);
         return NextResponse.json({
           valid: isValid,
-          error: isValid ? null : "Invalid API key or Azure configuration",
+          error: isValid ? null
+            : responses ? "Invalid API key, or this Azure resource does not expose the v1 /responses surface"
+            : "Invalid API key or Azure configuration",
         });
+      }
+
+      // AWS-signed providers (Bedrock) have no bearer key for the generic probes below, which
+      // would reject bedrock outright and send bedrock-xai to a literal "{region}" host.
+      if (AI_PROVIDERS[provider]?.credentialForm === "aws") {
+        return NextResponse.json(await probeBedrockCredentials({ apiKey, providerSpecificData }, fetch));
       }
 
       // Generic probe for webSearch/webFetch providers (config-driven)

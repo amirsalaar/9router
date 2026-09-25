@@ -127,7 +127,16 @@ const MODEL_PREFIX_PROVIDERS = [
   // Codex CLI sends this bare virtual model for auto-review — keep it on OAuth Codex (#1398).
   [/^codex-auto-review$/, "codex"],
   [/^claude-/, "anthropic"],
+  // Bedrock inference profile IDs: us.anthropic.*, global.anthropic.*, eu.anthropic.*, etc.
+  // Claude Code stores the Bedrock model ID directly (e.g. us.anthropic.claude-sonnet-4-6),
+  // so bare usage without a provider/ prefix must route to bedrock, not fall through to openai.
+  [/^(us|eu|ap|global)\.(anthropic|meta|amazon|mistral|xai)\./, "bedrock"],
   [/^gemini-/, "gemini"],
+  // Codex CLI's automatic approval review sends a bare Copilot-only id (gpt-5.6-luna), which
+  // fell through to the openai default and 404'd on a setup with no openai connection.
+  // openai's own gpt-5 line stops at 5.4, so 5.5+ and gpt-6+ are Copilot-only and safe to
+  // claim here; 5.4 and below must stay on openai. Precedes the generic gpt-* rule.
+  [/^gpt-(5\.[5-9]|[6-9])/, "github"],
   [/^gpt-/, "openai"],
   [/^o[134]/, "openai"],
   [/^deepseek-/, "openrouter"],
