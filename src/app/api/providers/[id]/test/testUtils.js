@@ -4,6 +4,7 @@ import { testProxyUrl } from "@/lib/network/proxyTest";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
+import { resolveAzureTarget } from "open-sse/executors/azure.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
 import {
@@ -547,15 +548,16 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
       }
       case "azure": {
         const psd = connection.providerSpecificData || {};
-        const endpoint = (psd.azureEndpoint || "").replace(/\/$/, "");
-        const deployment = psd.deployment || "gpt-4";
-        const apiVersion = psd.apiVersion || "2024-10-01-preview";
-        const url = `${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
+        // Probe the same endpoint the router will call, so a Responses-mode
+        // connection on a resource without the v1 surface fails here, not at runtime.
+        const { url, deployment, responses } = resolveAzureTarget(psd);
         const headers = { "api-key": connection.apiKey, "Content-Type": "application/json" };
         if (psd.organization) headers["OpenAI-Organization"] = psd.organization;
         const res = await fetchWithConnectionProxy(url, {
           method: "POST", headers,
-          body: JSON.stringify({ messages: [{ role: "user", content: "test" }], max_completion_tokens: 1 }),
+          body: JSON.stringify(responses
+            ? { model: deployment, input: "test", max_output_tokens: 16 }
+            : { messages: [{ role: "user", content: "test" }], max_completion_tokens: 1 }),
         }, effectiveProxy);
         const valid = res.status !== 401 && res.status !== 403;
         return { valid, error: valid ? null : "Invalid API key or Azure configuration" };
