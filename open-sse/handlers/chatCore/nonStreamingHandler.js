@@ -12,7 +12,7 @@ import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, sav
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
-import { ROLE, RESPONSES_ITEM, OPENAI_FINISH } from "../../translator/schema/index.js";
+import { OPENAI_FINISH, ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 
 function parseToolArguments(value) {
   if (!value) return {};
@@ -166,6 +166,8 @@ function openAICompletionToResponses(responseBody, customToolNames = null) {
  */
 function responsesBodyToOpenAICompletion(responseBody) {
   const output = Array.isArray(responseBody?.output) ? responseBody.output : [];
+  const incompleteReason = responseBody?.incomplete_details?.reason;
+  const isIncomplete = responseBody?.status === "incomplete" || Boolean(incompleteReason);
 
   // Responses can emit alternating reasoning + message items, and early message
   // items are often empty — the answer is the last message that carries text.
@@ -184,7 +186,9 @@ function responsesBodyToOpenAICompletion(responseBody) {
     .flatMap(i => i.summary.filter(s => typeof s?.text === "string").map(s => s.text))
     .join("");
 
-  const toolCalls = output
+  // Incomplete Responses output can contain a partial function call. Do not
+  // hand its arguments to a chat client as an executable tool call.
+  const toolCalls = (isIncomplete ? [] : output)
     .filter(i => i?.type === RESPONSES_ITEM.FUNCTION_CALL || i?.type === RESPONSES_ITEM.CUSTOM_TOOL_CALL)
     .map((item, idx) => ({
       id: item.call_id || `call_${item.name || "tool"}_${Date.now()}_${idx}`,
@@ -204,7 +208,9 @@ function responsesBodyToOpenAICompletion(responseBody) {
 
   const usage = responseBody?.usage || {};
   const cached = usage.input_tokens_details?.cached_tokens || usage.cached_tokens || 0;
-  const truncated = responseBody?.incomplete_details?.reason === "max_output_tokens";
+  const finishReason = isIncomplete
+    ? (incompleteReason === OPENAI_FINISH.CONTENT_FILTER ? OPENAI_FINISH.CONTENT_FILTER : OPENAI_FINISH.LENGTH)
+    : (toolCalls.length ? OPENAI_FINISH.TOOL_CALLS : OPENAI_FINISH.STOP);
 
   return {
     id: responseBody?.id || `chatcmpl-${Date.now()}`,
@@ -214,7 +220,7 @@ function responsesBodyToOpenAICompletion(responseBody) {
     choices: [{
       index: 0,
       message,
-      finish_reason: toolCalls.length ? "tool_calls" : (truncated ? "length" : "stop"),
+      finish_reason: finishReason,
     }],
     usage: {
       prompt_tokens: usage.input_tokens || 0,

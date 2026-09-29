@@ -235,7 +235,7 @@ export async function POST(request) {
         return NextResponse.json({
           valid: isValid,
           error: isValid ? null
-            : responses ? "Invalid API key, or this Azure resource does not expose the v1 /responses surface"
+            : responses ? "Invalid API key, incorrect Azure deployment or configuration, or unavailable v1 /responses surface"
             : "Invalid API key or Azure configuration",
         });
       }

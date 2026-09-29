@@ -84,15 +84,19 @@ describe("azure Responses API route", () => {
   // Probing the right URL is only half the job: the validate route and the Test button also have
   // to judge the answer. Statuses below are the ones a real resource returned.
   describe("isAzureProbeValid", () => {
-    it("accepts the 200 a working v1 surface returns", () => {
-      expect(isAzureProbeValid(200, true)).toBe(true);
+    it("accepts successful Responses statuses", () => {
+      for (const status of [200, 201, 204]) {
+        expect(isAzureProbeValid(status, true)).toBe(true);
+      }
     });
 
-    it("rejects the statuses that mean the v1 surface is unusable", () => {
-      // 400 "API version not supported" — resource has no v1 surface.
-      expect(isAzureProbeValid(400, true)).toBe(false);
-      // 404 "DeploymentNotFound" — the deployment named in the body does not exist.
-      expect(isAzureProbeValid(404, true)).toBe(false);
+    it("rejects unsupported and unknown Responses statuses", () => {
+      // 400: unsupported API version; 404: DeploymentNotFound.
+      // Redirects, unsupported methods, gone endpoints, invalid payloads, and
+      // unimplemented servers do not establish a usable Responses connection.
+      for (const status of [302, 400, 404, 405, 410, 422, 501]) {
+        expect(isAzureProbeValid(status, true)).toBe(false);
+      }
     });
 
     // A healthy chat deployment answers the max_tokens:1 probe with 400 ("model output limit
@@ -110,9 +114,10 @@ describe("azure Responses API route", () => {
       }
     });
 
-    // Quota and outages say nothing about the credentials or the route.
-    it("accepts transient statuses so a busy resource is not marked invalid", () => {
-      for (const status of [429, 500, 503]) {
+    // Timeouts, quota, and ordinary upstream outages do not establish that
+    // the connection is misconfigured.
+    it("accepts explicitly tolerated transient Responses statuses", () => {
+      for (const status of [408, 429, 500, 502, 503, 504]) {
         expect(isAzureProbeValid(status, true)).toBe(true);
       }
     });
