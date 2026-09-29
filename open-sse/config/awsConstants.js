@@ -85,6 +85,7 @@ export const BEDROCK = {
   // Credential probe for the dashboard's validate and Test paths: ListFoundationModels on the
   // control-plane host (bedrock.<region>, not bedrock-runtime.<region>), signed as "bedrock".
   probePath: "foundation-models",
+  probeTimeoutMs: 8000,
   // AWS names the failure in this response header, e.g. "AccessDeniedException:<namespace>".
   errorTypeHeader: "x-amzn-errortype",
   // Signature accepted, action refused: the credentials are genuine but this identity may not
