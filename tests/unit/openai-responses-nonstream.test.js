@@ -282,6 +282,37 @@ describe("non-stream Chat upstream for a Responses-API client (op-ericding bug)"
     expect(result.status).toBe(502);
   });
 
+  it.each([
+    ["a valid parallel call plus one missing an ID", null, [
+      { id: "call_1", type: "function", function: { name: "shell", arguments: "{}" } },
+      { id: "", type: "function", function: { name: "lookup", arguments: "{}" } },
+    ]],
+    ["assistant text plus a call with a blank name", "answer", [
+      { id: "call_bad", type: "function", function: { name: " ", arguments: "{}" } },
+    ]],
+  ])("rejects direct Chat JSON with %s", async (_case, content, toolCalls) => {
+    const body = structuredClone(CHAT_TOOL_BODY);
+    body.choices[0].message.content = content;
+    body.choices[0].message.tool_calls = toolCalls;
+    const result = await handleNonStreamingResponse({
+      providerResponse: new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } }),
+      provider: "op-test-chat",
+      model: "gpt-x",
+      sourceFormat: FORMATS.OPENAI_RESPONSES,
+      targetFormat: FORMATS.OPENAI,
+      body: { model: "gpt-x", input: "probe" },
+      stream: false,
+      requestStartTime: Date.now(),
+      reqLogger: { logProviderResponse: vi.fn(), logConvertedResponse: vi.fn() },
+      trackDone: vi.fn(),
+      appendLog: vi.fn(),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.response.status).toBe(502);
+    expect(await result.response.json()).not.toHaveProperty("choices");
+  });
+
   it("leaves chat->chat untouched", () => {
     const out = translateNonStreamingResponse(CHAT_TOOL_BODY, FORMATS.OPENAI, FORMATS.OPENAI);
     expect(out.object).toBe("chat.completion");
@@ -395,6 +426,23 @@ describe("forced-SSE JSON path for a Responses-API client behind a chat upstream
     const result = await handleForcedSSEToJson(sseCtx(FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI, raw));
     expect(result.success).toBe(false);
     expect(result.status).toBe(502);
+  });
+
+  it("rejects a Chat SSE stream with one valid call and one missing a call ID", async () => {
+    const raw = [
+      `data: ${JSON.stringify({ id: "chatcmpl-mixed", choices: [{ index: 0, delta: { tool_calls: [
+        { index: 0, id: "call_good", type: "function", function: { name: "shell", arguments: "{}" } },
+        { index: 1, type: "function", function: { name: "lookup", arguments: "{}" } },
+      ] }, finish_reason: null }] })}`,
+      `data: ${JSON.stringify({ id: "chatcmpl-mixed", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}`,
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+
+    const result = await handleForcedSSEToJson(sseCtx(FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI, raw));
+    expect(result.success).toBe(false);
+    expect(result.response.status).toBe(502);
+    expect(await result.response.json()).not.toHaveProperty("output");
   });
 
   it("still returns chat.completion for a plain chat client", async () => {
@@ -607,6 +655,29 @@ describe("forced-SSE JSON path for a Responses-API client behind a chat upstream
     expect(result.success).toBe(false);
     expect(result.status).toBe(502);
     expect(ctx.onRequestSuccess).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a valid parallel call plus one missing a call ID", [
+      { type: "function_call", call_id: "call_good", name: "shell", arguments: "{}" },
+      { type: "function_call", call_id: "", name: "lookup", arguments: "{}" },
+    ]],
+    ["assistant text plus a call with a blank name", [
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] },
+      { type: "function_call", call_id: "call_bad", name: " ", arguments: "{}" },
+    ]],
+  ])("rejects native Responses output with %s", async (_case, output) => {
+    const raw = nativeSSE([{
+      type: "response.completed",
+      response: { id: "resp_mixed", status: "completed", output },
+    }]);
+
+    const result = await handleForcedSSEToJson(
+      sseCtx(FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI_RESPONSES, raw)
+    );
+    expect(result.success).toBe(false);
+    expect(result.response.status).toBe(502);
+    expect(await result.response.json()).not.toHaveProperty("output");
   });
 
   it("surfaces a native Responses failure instead of recording success", async () => {

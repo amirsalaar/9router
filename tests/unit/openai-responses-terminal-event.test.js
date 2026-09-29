@@ -55,6 +55,39 @@ describe("OpenAI Responses streaming termination", () => {
     expect(output).not.toContain('"finish_reason":"stop"');
   });
 
+  it.each(["response.done", "response.failed"])("surfaces %s with failed status as a Chat stream error after a tool call", async (eventType) => {
+    const output = await runTransform([
+      `event: response.output_item.added`,
+      `data: ${JSON.stringify({ type: "response.output_item.added", item: { id: "fc_1", type: "function_call", call_id: "call_1", name: "shell", arguments: "" } })}`,
+      "",
+      `event: ${eventType}`,
+      `data: ${JSON.stringify({ type: eventType, response: { id: "resp_failed", status: "failed", error: { type: "server_error", message: "upstream overloaded" } } })}`,
+      "",
+    ].join("\n"), FORMATS.OPENAI);
+
+    const chunks = output.split("\n")
+      .filter((line) => line.startsWith("data: ") && line !== "data: [DONE]")
+      .map((line) => JSON.parse(line.slice(6)));
+    expect(chunks.find((chunk) => chunk.error)?.error).toEqual({
+      type: "server_error",
+      message: "upstream overloaded",
+    });
+    expect(chunks.some((chunk) => chunk.choices?.[0]?.finish_reason === "tool_calls")).toBe(false);
+  });
+
+  it("reports a failed response.done even without an upstream error object", async () => {
+    const output = await runTransform([
+      "event: response.done",
+      `data: ${JSON.stringify({ type: "response.done", response: { id: "resp_failed", status: "failed" } })}`,
+      "",
+    ].join("\n"), FORMATS.OPENAI);
+
+    const chunks = output.split("\n")
+      .filter((line) => line.startsWith("data: ") && line !== "data: [DONE]")
+      .map((line) => JSON.parse(line.slice(6)));
+    expect(chunks.find((chunk) => chunk.error)?.error.message).toBe("upstream Responses stream failed");
+  });
+
   it("emits a response.failed event when a Responses stream closes before a terminal event", async () => {
     const output = await runTransform([
       `event: response.created`,

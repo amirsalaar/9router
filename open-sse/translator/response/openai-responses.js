@@ -804,6 +804,31 @@ export function openaiResponsesToOpenAIResponse(chunk, state) {
     return null;
   }
 
+  // A response.done event can carry a failed status. Handle it with the
+  // explicit failure events before the completion branch computes a finish reason.
+  if (eventType === "error" || eventType === "response.failed"
+    || (eventType === "response.done" && data.response?.status === "failed")) {
+    // Avoid emitting duplicate errors (error + response.failed arrive back-to-back)
+    if (state.finishReasonSent) return null;
+
+    const error = data.error || data.response?.error || {
+      type: "stream_error",
+      message: "upstream Responses stream failed"
+    };
+    state.error = error;
+    state.finishReasonSent = true;
+
+    // Preserve the Chat chunk for pivot translations while giving OpenAI SSE
+    // clients a top-level error they can treat as a failed request.
+    const errorChunk = buildChunk(
+      { id: state.chatId || `chatcmpl-${Date.now()}`, created: state.created || Math.floor(Date.now() / 1000), model: state.model || MODEL_FALLBACK },
+      { content: `[Error] ${error.message || JSON.stringify(error)}` },
+      OPENAI_FINISH.STOP
+    );
+    errorChunk.error = error;
+    return errorChunk;
+  }
+
   // Response completed
   if (eventType === "response.completed" || eventType === "response.done" || eventType === "response.incomplete") {
     // Extract usage from response.completed event
@@ -839,26 +864,6 @@ export function openaiResponsesToOpenAIResponse(chunk, state) {
       }
       
       return finalChunk;
-    }
-    return null;
-  }
-
-  // Error events from Responses API (e.g. model_not_found)
-  if (eventType === "error" || eventType === "response.failed") {
-    // Avoid emitting duplicate errors (error + response.failed arrive back-to-back)
-    if (state.finishReasonSent) return null;
-
-    const error = data.error || data.response?.error;
-    if (error) {
-      state.error = error;
-      state.finishReasonSent = true;
-
-      // Surface the error as an OpenAI-compatible error chunk
-      return buildChunk(
-        { id: state.chatId || `chatcmpl-${Date.now()}`, created: state.created || Math.floor(Date.now() / 1000), model: state.model || MODEL_FALLBACK },
-        { content: `[Error] ${error.message || JSON.stringify(error)}` },
-        OPENAI_FINISH.STOP
-      );
     }
     return null;
   }

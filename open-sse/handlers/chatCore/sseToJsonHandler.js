@@ -65,14 +65,28 @@ function extractCustomToolInput(argumentsValue) {
   return argumentsText;
 }
 
+function hasValidToolIdentity(id, name) {
+  return typeof id === "string" && id.trim().length > 0
+    && typeof name === "string" && name.trim().length > 0;
+}
+
+function hasValidResponsesToolCalls(output) {
+  return !Array.isArray(output) || output.every((item) =>
+    (item?.type !== RESPONSES_ITEM.FUNCTION_CALL && item?.type !== RESPONSES_ITEM.CUSTOM_TOOL_CALL)
+      || hasValidToolIdentity(item.call_id, item.name)
+  );
+}
+
 export function hasActionableChatOutput(choice) {
   const message = choice?.message;
+  const toolCalls = message?.tool_calls;
+  if (toolCalls != null && (!Array.isArray(toolCalls) || !toolCalls.every(
+    (call) => hasValidToolIdentity(call?.id, call?.function?.name)
+  ))) return false;
+
   return (typeof message?.content === "string" && message.content.trim().length > 0)
     || (typeof message?.refusal === "string" && message.refusal.trim().length > 0)
-    || (Array.isArray(message?.tool_calls) && message.tool_calls.some(
-      (call) => typeof call?.id === "string" && call.id.length > 0
-        && typeof call?.function?.name === "string" && call.function.name.trim().length > 0
-    ));
+    || (Array.isArray(toolCalls) && toolCalls.length > 0);
 }
 
 function chatCompletionToResponses(responseBody, customToolNames = null) {
@@ -246,6 +260,10 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
           HTTP_STATUS.BAD_GATEWAY,
           jsonResponse.error?.message || "Upstream Responses stream failed"
         );
+      }
+      if (!hasValidResponsesToolCalls(jsonResponse.output)) {
+        appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+        return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Upstream returned a tool call without a valid ID or name");
       }
       if (jsonResponse.status === "completed" && !hasActionableResponsesOutput(jsonResponse.output)) {
         appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
