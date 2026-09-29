@@ -10,6 +10,7 @@ import { escapeUri, signAwsRequest } from "../utils/awsSigv4.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { SSE_DONE, SSE_HEADERS } from "../utils/sseConstants.js";
 import { FORMATS } from "../translator/formats.js";
+import { FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
 
 /**
  * BedrockExecutor — Amazon Bedrock runtime.
@@ -122,19 +123,35 @@ export class BedrockExecutor extends BaseExecutor {
       credentials: resolved,
     });
 
-    const response = await proxyAwareFetch(
-      url,
-      {
-        method: "POST",
-        headers,
-        body: payload,
-        signal,
-        // Bedrock never redirects. Following one would replay the body and the signed
-        // x-amz-security-token at whatever origin the redirect names, so refuse instead.
-        redirect: "error",
-      },
-      proxyOptions,
+    const connectCtrl = new AbortController();
+    const connectTimer = setTimeout(
+      () => connectCtrl.abort(new Error("Bedrock fetch connect timeout")),
+      this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS,
     );
+    const fetchSignal = signal ? AbortSignal.any([signal, connectCtrl.signal]) : connectCtrl.signal;
+    let response;
+    try {
+      response = await proxyAwareFetch(
+        url,
+        {
+          method: "POST",
+          headers,
+          body: payload,
+          signal: fetchSignal,
+          // Bedrock never redirects. Following one would replay the body and the signed
+          // x-amz-security-token at whatever origin the redirect names, so refuse instead.
+          redirect: "error",
+        },
+        proxyOptions,
+      );
+    } catch (error) {
+      if (connectCtrl.signal.aborted && !signal?.aborted) {
+        throw new Error("Bedrock fetch connect timeout", { cause: error });
+      }
+      throw error;
+    } finally {
+      clearTimeout(connectTimer);
+    }
 
     // The returned headers only feed chatCore's request logger, which writes them to disk
     // unmasked. The session token is a credential and the signature can replay this request,
@@ -435,7 +452,27 @@ export async function probeBedrockCredentials(credentials, fetchFn) {
     service: BEDROCK.service,
     credentials: resolved,
   });
-  const res = await fetchFn(url, { method: "GET", headers, redirect: "error" });
+  const probeCtrl = new AbortController();
+  const probeTimer = setTimeout(
+    () => probeCtrl.abort(new Error("AWS credential probe timed out")),
+    BEDROCK.probeTimeoutMs,
+  );
+  let res;
+  try {
+    res = await fetchFn(url, {
+      method: "GET",
+      headers,
+      redirect: "error",
+      signal: probeCtrl.signal,
+    });
+  } catch (error) {
+    if (probeCtrl.signal.aborted) {
+      return { valid: false, error: "AWS credential probe timed out" };
+    }
+    throw error;
+  } finally {
+    clearTimeout(probeTimer);
+  }
   if (res.ok) return { valid: true, error: null };
 
   const errorType = (res.headers.get(BEDROCK.errorTypeHeader) || "").split(":")[0];

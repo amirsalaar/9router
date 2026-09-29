@@ -69,10 +69,39 @@ describe("probeBedrockCredentials", () => {
     expect(result.error).toMatch(/Invalid AWS region/);
     expect(fetchFn).not.toHaveBeenCalled();
   });
+
+  it("returns a validation error when the AWS control-plane probe stalls", async () => {
+    vi.useFakeTimers();
+    let markStarted;
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    const fetchFn = (_url, init) => {
+      markStarted();
+      if (!init.signal) return Promise.reject(new Error("AWS probe has no timeout signal"));
+      return new Promise((_resolve, reject) => {
+        init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+      });
+    };
+
+    try {
+      const pending = probeBedrockCredentials(STATIC_CREDS, fetchFn);
+      pending.catch(() => {});
+      const result = expect(pending).resolves.toMatchObject({
+        valid: false,
+        error: expect.stringMatching(/timed out/i),
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(8000);
+      await result;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("BedrockExecutor.execute request-log headers", () => {
-  beforeEach(() => proxyAwareFetch.mockReset());
+  beforeEach(() => {
+    proxyAwareFetch.mockReset();
+  });
 
   it("sends real credentials to AWS but returns redacted ones for the request logger", async () => {
     proxyAwareFetch.mockResolvedValue(new Response("{}", { status: 200 }));
@@ -100,5 +129,44 @@ describe("BedrockExecutor.execute request-log headers", () => {
     // The non-secret parts stay, so a SignatureDoesNotMatch can still be debugged from the log.
     expect(logged.Authorization).toContain("Credential=ASIAEXAMPLE/");
     expect(logged.Authorization).toContain("SignedHeaders=");
+  });
+
+  it("aborts a request that stalls before response headers", async () => {
+    vi.useFakeTimers();
+    const executor = new BedrockExecutor("bedrock");
+    executor.config = { ...executor.config, timeoutMs: 25 };
+    const client = new AbortController();
+    let markStarted;
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    proxyAwareFetch.mockImplementation((...args) => {
+      const init = args[1];
+      if (!init?.signal) {
+        throw new Error("Bedrock fetch was sent without an abort signal");
+      }
+      markStarted(init.signal);
+      return new Promise((_resolve, reject) => {
+        init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+      });
+    });
+
+    const pending = executor.execute({
+      model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      body: { messages: [{ role: "user", content: "hi" }], max_tokens: 16 },
+      stream: false,
+      credentials: STATIC_CREDS,
+      signal: client.signal,
+    });
+    pending.catch(() => {});
+
+    try {
+      const sentSignal = await started;
+      await vi.advanceTimersByTimeAsync(25);
+      expect(sentSignal.aborted).toBe(true);
+      await expect(pending).rejects.toThrow(/timeout/i);
+    } finally {
+      client.abort();
+      await pending.catch(() => {});
+      vi.useRealTimers();
+    }
   });
 });
