@@ -1,7 +1,7 @@
 # Unreleased
 
 ## Fixes
-- **Codex Responses**: expose active namespace child tools to Chat providers, reject ambiguous names, and preserve reasoning, answer, refusal, and tool items with distinct indices. Report truncated, incomplete, failed, or reasoning-only upstream results accurately, including native Codex CLI traffic.
+- **Codex Responses**: expose active namespace child tools to Chat providers with distinct names and restore their qualified names on return, including when multiple namespaces contain a `js` tool. Preserve reasoning, answer, refusal, and tool items with distinct indices. Report truncated, incomplete, failed, or reasoning-only upstream results accurately, including native Codex CLI traffic.
 
 # v0.5.91 (2026-09-26)
 

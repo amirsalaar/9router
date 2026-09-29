@@ -15,6 +15,7 @@ import {
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM } from "../schema/index.js";
 
 const MAX_TOOL_NAME_LEN = 128;
+const MAX_CHAT_TOOL_NAME_LEN = 64;
 
 /**
  * Convert OpenAI Responses API request to OpenAI Chat Completions format
@@ -183,6 +184,7 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
   const expandTools = (declarations, includeDeferred) => declarations.flatMap((group) => {
     if (!group || typeof group !== "object") return [];
     const isNamespace = group.type === "namespace";
+    if (isNamespace && (typeof group.name !== "string" || !group.name.trim())) return [];
     const children = isNamespace ? (Array.isArray(group.tools) ? group.tools : []) : [group];
     const owner = isNamespace ? group.name : null;
     return children
@@ -202,7 +204,6 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
     const name = tool.name;
     if (!name || typeof name !== "string" || name.trim() === "") return null;
     if (tool.type === "custom") {
-      customToolNames.add(name);
       const formatHint = [tool.format?.syntax, tool.format?.definition].filter(Boolean).join("\n");
       return {
         type: OPENAI_BLOCK.FUNCTION,
@@ -234,25 +235,60 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
     };
   };
   if (callableTools.length > 0) {
-    result.tools = [];
-    const seenNames = new Map();
+    const declarations = [];
+    const seenIdentities = new Map();
     for (const { tool, owner } of callableTools) {
       const converted = convertTool(tool);
       const name = converted?.function?.name;
       if (typeof name !== "string" || !name.trim()) continue;
-      const previous = seenNames.get(name);
-      if (previous) {
-        if (previous.owner !== owner) {
-          const error = new Error(`Ambiguous Codex tool "${name}" in namespaces "${previous.owner || "top-level"}" and "${owner || "top-level"}"`);
-          error.code = "ambiguous_namespace_tool";
-          throw error;
-        }
-        result.tools[previous.index] = converted;
-      } else {
-        seenNames.set(name, { owner, index: result.tools.length });
-        result.tools.push(converted);
+      const originalName = owner === null ? name : `${owner}.${name}`;
+      const entry = { converted, name, owner, originalName, custom: tool.type === "custom" };
+      const previousIndex = seenIdentities.get(originalName);
+      if (previousIndex !== undefined) declarations[previousIndex] = entry;
+      else {
+        seenIdentities.set(originalName, declarations.length);
+        declarations.push(entry);
       }
     }
+
+    // Chat function names cannot contain dots and are limited to 64 characters.
+    // Keep the namespace visible to the model, then map every sent alias back to
+    // Codex's fully qualified tool name on the response path.
+    const usedNames = new Set(declarations.filter(({ owner }) => owner === null).map(({ name }) => name));
+    const originalToAlias = new Map();
+    const toolNameMap = new Map();
+    result.tools = declarations.map(({ converted, name, owner, originalName, custom }) => {
+      let sentName = name;
+      if (owner !== null) {
+        const base = `${owner}__${name}`.replace(/[^A-Za-z0-9_-]/g, "_");
+        sentName = base.slice(0, MAX_CHAT_TOOL_NAME_LEN);
+        for (let suffix = 2; usedNames.has(sentName); suffix++) {
+          const disambiguator = `_${suffix}`;
+          sentName = `${base.slice(0, MAX_CHAT_TOOL_NAME_LEN - disambiguator.length)}${disambiguator}`;
+        }
+        usedNames.add(sentName);
+        toolNameMap.set(sentName, originalName);
+      }
+      originalToAlias.set(originalName, sentName);
+      if (custom) customToolNames.add(sentName);
+      return { ...converted, function: { ...converted.function, name: sentName } };
+    });
+
+    for (const message of result.messages) {
+      if (message.role !== ROLE.ASSISTANT || !Array.isArray(message.tool_calls)) continue;
+      for (const call of message.tool_calls) {
+        const originalName = call.function?.name;
+        if (originalToAlias.has(originalName)) call.function.name = originalToAlias.get(originalName);
+      }
+    }
+    const selectedName = result.tool_choice?.function?.name || result.tool_choice?.name;
+    if (originalToAlias.has(selectedName)) {
+      result.tool_choice = {
+        type: OPENAI_BLOCK.FUNCTION,
+        function: { name: originalToAlias.get(selectedName) }
+      };
+    }
+    if (toolNameMap.size > 0) result._toolNameMap = toolNameMap;
   } else if (Array.isArray(body.tools) && body.tools.length > 0) {
     result.tools = [];
   }
