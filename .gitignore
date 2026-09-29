@@ -87,6 +87,10 @@ graphify-out/*
 .PR/
 .next-analyze/*
 
+# Local agent instructions for this checkout
+/AGENTS.local.md
+/AGENTS.override.md
+
 # Kiro local workspace state
 .kiro/
 9router-*
