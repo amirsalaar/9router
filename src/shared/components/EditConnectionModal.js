@@ -23,6 +23,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
   });
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
   const [awsData, setAwsData] = useState({ profile: "", region: "", accessKeyId: "", sessionToken: "" });
+  const [clearAwsSessionToken, setClearAwsSessionToken] = useState(false);
   const [region, setRegion] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
@@ -55,8 +56,9 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           profile: psd.profile || "",
           region: psd.region || "",
           accessKeyId: psd.accessKeyId || "",
-          sessionToken: psd.sessionToken || "",
+          sessionToken: "",
         });
+        setClearAwsSessionToken(false);
       }
       // Load region for providers that support it (e.g. xiaomi-tokenplan)
       const providerCfg = AI_PROVIDERS?.[connection.provider];
@@ -67,7 +69,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       setTestResult(null);
       setValidationResult(null);
     }
-  }, [connection]);
+  }, [connection, isOpen]);
 
   const isOAuth = connection?.authType === "oauth";
   const isAzure = connection?.provider === "azure";
@@ -84,14 +86,13 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     return undefined;
   };
 
-  // All four fields, empty ones included: the update route merges into the saved object, so an
-  // omitted field would keep its old value and a profile could never be cleared to switch the
-  // connection to static keys (a profile takes precedence when both are set).
+  // The server keeps a saved session token when this password field is blank. Other empty
+  // fields still clear their saved values so a profile can be switched to static keys.
   const buildAwsSpecificData = () => ({
     profile: awsData.profile.trim(),
     region: awsData.region.trim(),
     accessKeyId: awsData.accessKeyId.trim(),
-    sessionToken: awsData.sessionToken.trim(),
+    sessionToken: clearAwsSessionToken ? null : awsData.sessionToken.trim(),
   });
 
   const handleTest = async () => {
@@ -319,7 +320,20 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
                 value={awsData.sessionToken}
                 onChange={(e) => setAwsData({ ...awsData, sessionToken: e.target.value })}
                 placeholder="FwoGZXIvYXdz..."
+                hint="Leave blank to keep the saved token. Enter a new token to replace it."
+                disabled={clearAwsSessionToken}
               />
+              <label className="flex items-center gap-2 text-sm text-text-muted">
+                <input
+                  type="checkbox"
+                  checked={clearAwsSessionToken}
+                  onChange={(e) => {
+                    setClearAwsSessionToken(e.target.checked);
+                    if (e.target.checked) setAwsData({ ...awsData, sessionToken: "" });
+                  }}
+                />
+                Remove saved session token
+              </label>
             </div>
           </div>
         )}
@@ -373,4 +387,3 @@ EditConnectionModal.propTypes = {
   onSave: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,
 };
-
