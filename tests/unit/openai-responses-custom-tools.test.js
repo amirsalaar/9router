@@ -17,7 +17,75 @@ const EXEC_TOOL = {
   },
 };
 
+const DEFERRED_GROUP = {
+  type: "namespace",
+  name: "mcp__prod",
+  tools: [{
+    type: "function",
+    name: "list_ai_investigations",
+    defer_loading: true,
+    parameters: { type: "object", properties: {} },
+  }],
+};
+
 describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
+  it("advertises namespace children as callable Chat tools instead of their groups", () => {
+    const out = openaiResponsesToOpenAIRequest("cx/gpt-6-luna", {
+      input: [
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [{
+            type: "namespace",
+            name: "functions",
+            tools: [
+              {
+                type: "function",
+                name: "exec_command",
+                description: "Run a shell command",
+                parameters: {
+                  type: "object",
+                  properties: { cmd: { type: "string" } },
+                  required: ["cmd"],
+                },
+              },
+              {
+                type: "function",
+                name: "write_stdin",
+                parameters: { type: "object", properties: { session_id: { type: "integer" } } },
+              },
+            ],
+          }],
+        },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "Run pwd" }] },
+      ],
+      tools: [
+        {
+          type: "namespace",
+          name: "clock",
+          tools: [{ type: "function", name: "curr_time", parameters: { type: "object", properties: {} } }],
+        },
+        {
+          type: "namespace",
+          name: "mcp__cua_repl",
+          tools: [{ type: "function", name: "js", parameters: { type: "object", properties: { code: { type: "string" } } } }],
+        },
+      ],
+    }, true, null);
+
+    expect(out.tools.map((tool) => tool.function.name)).toEqual([
+      "curr_time",
+      "js",
+      "exec_command",
+      "write_stdin",
+    ]);
+    expect(out.tools.find((tool) => tool.function.name === "exec_command").function.parameters).toEqual({
+      type: "object",
+      properties: { cmd: { type: "string" } },
+      required: ["cmd"],
+    });
+  });
+
   it("promotes additional_tools custom declarations into Chat tools", () => {
     const out = openaiResponsesToOpenAIRequest("cx/gpt-5.6-sol", {
       input: [
@@ -41,6 +109,40 @@ describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
     });
     expect(out._customToolNames).toEqual(["exec"]);
     expect(out.messages.some((message) => message.role === "developer")).toBe(false);
+  });
+
+  it("keeps deferred namespace children unloaded until additional_tools activates them", () => {
+    const before = openaiResponsesToOpenAIRequest("cx/gpt-6-luna", {
+      input: "Find an investigation",
+      tools: [DEFERRED_GROUP],
+    }, true, null);
+    expect(before.tools || []).toHaveLength(0);
+
+    const after = openaiResponsesToOpenAIRequest("cx/gpt-6-luna", {
+      input: [
+        { type: "additional_tools", role: "developer", tools: [DEFERRED_GROUP] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "Find an investigation" }] },
+      ],
+      tools: [DEFERRED_GROUP],
+    }, true, null);
+    expect(after.tools.map((tool) => tool.function.name)).toEqual(["list_ai_investigations"]);
+  });
+
+  it("rejects active namespace children whose leaf names collide", () => {
+    let error;
+    try {
+      openaiResponsesToOpenAIRequest("cx/gpt-6-luna", {
+        input: "Run JS",
+        tools: [
+          { type: "namespace", name: "first", tools: [{ type: "function", name: "js", parameters: { type: "object", properties: {} } }] },
+          { type: "namespace", name: "second", tools: [{ type: "function", name: "js", parameters: { type: "object", properties: {} } }] },
+        ],
+      }, true, null);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error?.code).toBe("ambiguous_namespace_tool");
+    expect(error?.message).toContain("js");
   });
 
   it("translates custom tool call/output history into Chat assistant/tool messages", () => {
