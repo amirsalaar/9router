@@ -140,6 +140,74 @@ function openAICompletionToResponses(responseBody, customToolNames = null) {
 }
 
 /**
+ * Inverse of openAICompletionToResponses: fold a Responses API body's `output[]`
+ * into Chat Completions `choices[]`. Needed when the upstream answered on the
+ * Responses wire (azure apiType:"responses", openai-compatible nodes, muse-spark)
+ * but the client speaks chat. The streaming equivalent lives in sseToJsonHandler.js;
+ * without this the client gets a body with no `choices` and reads empty content.
+ */
+function responsesBodyToOpenAICompletion(responseBody) {
+  const output = Array.isArray(responseBody?.output) ? responseBody.output : [];
+
+  // Responses can emit alternating reasoning + message items, and early message
+  // items are often empty — the answer is the last message that carries text.
+  let text = "";
+  for (const item of output) {
+    if (item?.type !== RESPONSES_ITEM.MESSAGE || !Array.isArray(item.content)) continue;
+    const itemText = item.content
+      .filter(c => c?.type === RESPONSES_ITEM.OUTPUT_TEXT && typeof c.text === "string")
+      .map(c => c.text)
+      .join("");
+    if (itemText) text = itemText;
+  }
+
+  const reasoning = output
+    .filter(i => i?.type === RESPONSES_ITEM.REASONING && Array.isArray(i.summary))
+    .flatMap(i => i.summary.filter(s => typeof s?.text === "string").map(s => s.text))
+    .join("");
+
+  const toolCalls = output
+    .filter(i => i?.type === RESPONSES_ITEM.FUNCTION_CALL || i?.type === RESPONSES_ITEM.CUSTOM_TOOL_CALL)
+    .map((item, idx) => ({
+      id: item.call_id || `call_${item.name || "tool"}_${Date.now()}_${idx}`,
+      type: "function",
+      function: {
+        name: item.name || "",
+        // custom_tool_call carries freeform `input` instead of JSON `arguments`.
+        arguments: typeof item.arguments === "string" ? item.arguments
+          : typeof item.input === "string" ? item.input
+          : JSON.stringify(item.arguments || {}),
+      },
+    }));
+
+  const message = { role: ROLE.ASSISTANT, content: text || (toolCalls.length ? null : "") };
+  if (reasoning) message.reasoning_content = reasoning;
+  if (toolCalls.length) message.tool_calls = toolCalls;
+
+  const usage = responseBody?.usage || {};
+  const cached = usage.input_tokens_details?.cached_tokens || usage.cached_tokens || 0;
+  const truncated = responseBody?.incomplete_details?.reason === "max_output_tokens";
+
+  return {
+    id: responseBody?.id || `chatcmpl-${Date.now()}`,
+    object: "chat.completion",
+    created: responseBody?.created_at || Math.floor(Date.now() / 1000),
+    model: responseBody?.model || "unknown",
+    choices: [{
+      index: 0,
+      message,
+      finish_reason: toolCalls.length ? "tool_calls" : (truncated ? "length" : "stop"),
+    }],
+    usage: {
+      prompt_tokens: usage.input_tokens || 0,
+      completion_tokens: usage.output_tokens || 0,
+      total_tokens: usage.total_tokens || (usage.input_tokens || 0) + (usage.output_tokens || 0),
+      ...(cached > 0 ? { prompt_tokens_details: { cached_tokens: cached } } : {}),
+    },
+  };
+}
+
+/**
  * Translate non-streaming response body from provider format → OpenAI format.
  */
 export function translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames = null) {
@@ -148,6 +216,14 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
   // Responses API — convert so tool_calls/text surface as Responses `output`.
   if (targetFormat === FORMATS.OPENAI && sourceFormat === FORMATS.OPENAI_RESPONSES) {
     return openAICompletionToResponses(responseBody, customToolNames);
+  }
+  // The mirror case: provider answered on the Responses wire, client does not speak it.
+  // Fold output[] into choices[] and continue as if the provider had answered in chat shape.
+  // Every branch below keys on the *provider* format, so this is the rail that carries the
+  // client-specific exits (the claude branch next, then the plain-OpenAI return).
+  if (targetFormat === FORMATS.OPENAI_RESPONSES && responseBody?.object === "response") {
+    responseBody = responsesBodyToOpenAICompletion(responseBody);
+    targetFormat = FORMATS.OPENAI;
   }
   if (targetFormat === FORMATS.OPENAI && sourceFormat === FORMATS.CLAUDE) {
     return openAICompletionToClaudeMessage(responseBody);
