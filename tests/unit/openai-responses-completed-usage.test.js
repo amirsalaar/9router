@@ -139,6 +139,70 @@ describe("Responses response.completed reports token usage", () => {
     expect(completed[0].data.response.usage).toEqual({ input_tokens: 300, output_tokens: 20, total_tokens: 320 });
   });
 
+  it.each([0, 999])("derives the total when upstream reports inconsistent total_tokens=%i", async (totalTokens) => {
+    const events = parseEvents(await runTransform(FORMATS.OPENAI, [
+      ...sse({ id: "c4", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content: "Hi" } }] }),
+      ...sse({
+        id: "c4", object: "chat.completion.chunk",
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 300, completion_tokens: 20, total_tokens: totalTokens },
+      }),
+      "data: [DONE]",
+      "",
+    ]));
+
+    const completed = events.filter((e) => e.event === "response.completed");
+    expect(completed).toHaveLength(1);
+    expect(completed[0].data.response.usage).toEqual({
+      input_tokens: 300,
+      output_tokens: 20,
+      total_tokens: 320,
+    });
+  });
+
+  it("completes at [DONE] while the upstream connection remains open", async () => {
+    let upstream;
+    const input = new ReadableStream({
+      start(controller) {
+        upstream = controller;
+      },
+    });
+    const reader = input.pipeThrough(
+      createSSETransformStreamWithLogger(FORMATS.OPENAI, FORMATS.OPENAI_RESPONSES, "test"),
+    ).getReader();
+    const decoder = new TextDecoder();
+    const frames = [
+      ...sse({ id: "c5", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content: "Hi" } }] }),
+      ...sse({ id: "c5", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+      "data: [DONE]",
+      "",
+    ];
+    upstream.enqueue(new TextEncoder().encode(frames.join("\n") + "\n"));
+
+    let timer;
+    try {
+      let output = "";
+      const readUntilCompleted = async () => {
+        while (!output.includes('"type":"response.completed"')) {
+          const { value, done } = await reader.read();
+          if (done) throw new Error("stream ended before response.completed");
+          output += decoder.decode(value, { stream: true });
+        }
+      };
+      await Promise.race([
+        readUntilCompleted(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("response.completed waited for transport EOF")), 500);
+        }),
+      ]);
+      expect(parseEvents(output).filter((e) => e.event === "response.completed")).toHaveLength(1);
+    } finally {
+      clearTimeout(timer);
+      upstream.close();
+      await reader.cancel();
+    }
+  });
+
   it("still completes exactly once, without inventing usage, when the upstream reports none", async () => {
     const events = parseEvents(await runTransform(FORMATS.OPENAI, [
       ...sse({ id: "c2", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content: "Hi" } }] }),
