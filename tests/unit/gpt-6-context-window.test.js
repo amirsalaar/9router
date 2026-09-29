@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
+import { getCapabilitiesForModel, setCatalogSource } from "../../open-sse/providers/capabilities.js";
 import { PROVIDER_ALIASES, build } from "../../src/lib/modelCatalog/sync.js";
 
 // The gpt-6 family's API window is 1.05M. The pattern table published 272,000 for
@@ -75,5 +75,21 @@ describe("models.dev sync reaches GitHub Copilot", () => {
     expect(build(upstream, entries).providers.github).toEqual({
       "claude-sonnet-4.6": { maxOutput: 32000 },
     });
+  });
+
+  it("applies those Copilot deltas to an exact MODEL_CAPABILITIES id", () => {
+    // claude-sonnet-4.6 is canonical-exact (128k). Without refine() on that
+    // path the 32k Copilot delta from build() would never be read.
+    setCatalogSource({
+      getModalities: () => null,
+      getLimits: (provider, model) =>
+        provider === "github" && model === "claude-sonnet-4.6" ? { maxOutput: 32000 } : null,
+    });
+    try {
+      expect(getCapabilitiesForModel("github", "claude-sonnet-4.6").maxOutput).toBe(32000);
+      expect(getCapabilitiesForModel("claude", "claude-sonnet-4.6").maxOutput).toBe(128000);
+    } finally {
+      setCatalogSource(null);
+    }
   });
 });
