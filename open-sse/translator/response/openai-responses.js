@@ -99,7 +99,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
   // Handle reasoning across vendor shapes (reasoning_content / reasoning / reasoning_details)
   const reasoningText = extractReasoningText(delta);
   if (reasoningText) {
-    startReasoning(state, emit, idx);
+    startReasoning(state, emit);
     emitReasoningDelta(state, emit, reasoningText);
   }
 
@@ -110,7 +110,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     if (content.includes("<think>")) {
       state.inThinking = true;
       content = content.replace("<think>", "");
-      startReasoning(state, emit, idx);
+      startReasoning(state, emit);
     }
 
     if (content.includes("</think>")) {
@@ -125,7 +125,7 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
 
     if (state.inThinking && content) {
       emitReasoningDelta(state, emit, content);
-      return events;
+      content = "";
     }
 
     if (content) {
@@ -149,41 +149,78 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
   if (choice.finish_reason) {
     for (const i in state.msgItemAdded) closeMessage(state, emit, i);
     closeReasoning(state, emit);
-    for (const i in state.funcCallIds) closeToolCall(state, emit, i);
+    closeToolCalls(state, emit);
+    state.chatFinishReason = choice.finish_reason;
     // Upstreams report usage either on the finish chunk itself or on a trailing chunk
     // whose `choices` array is empty (OpenAI does the latter). Emitting
-    // response.completed here would freeze the payload before that trailing chunk is
-    // parsed, so when usage is not known yet we leave completion to flushEvents(),
-    // which runs once the upstream stream ends and by then has seen every chunk.
+    // the terminal event here would freeze the payload before that trailing chunk
+    // is parsed. When usage is not known yet we leave completion to flushEvents().
     //
     // That only holds on the direct openai:openai-responses route. When this converter
     // runs as the second hop of a pivot (Claude/Gemini/Kiro upstream), translateResponse()
     // drops the terminal null chunk before reaching us — the first hop returns null for
     // it, leaving nothing to iterate — so flushEvents() is never called and deferring
-    // would swallow the terminal event entirely. Keep the old behaviour there.
+    // would swallow the terminal event entirely.
     const flushReachesUs = state.targetFormat === FORMATS.OPENAI;
-    if (state.responsesUsage || !flushReachesUs) sendCompleted(state, emit);
+    if (state.responsesUsage || !flushReachesUs) sendChatFinish(state, emit);
   }
 
   return events;
 }
 
 // Helper functions
-function startReasoning(state, emit, idx) {
-  if (!state.reasoningId) {
-    state.reasoningId = `rs_${state.responseId}_${idx}`;
-    state.reasoningIndex = idx;
+function nextOutputIndex(state) {
+  const index = state.nextOutputIndex ?? 0;
+  state.nextOutputIndex = index + 1;
+  return index;
+}
+
+function messageOutputIndex(state, idx) {
+  state.msgOutputIndices ??= {};
+  return state.msgOutputIndices[idx] ??= nextOutputIndex(state);
+}
+
+function toolOutputIndex(state, idx) {
+  state.funcOutputIndices ??= {};
+  return state.funcOutputIndices[idx] ??= nextOutputIndex(state);
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasAssistantOutput(state) {
+  const hasText = state.assistantTextSeen || Object.values(state.msgTextBuf || {}).some(text =>
+    isNonEmptyString(text)
+  );
+  const hasToolCall = Object.keys(state.funcItemAdded || {}).some(idx =>
+    state.funcItemAdded[idx] &&
+    state.funcItemDone?.[idx] &&
+    isNonEmptyString(state.funcCallIds?.[idx]) &&
+    isNonEmptyString(state.funcNames?.[idx])
+  );
+  return hasText || hasToolCall;
+}
+
+function startReasoning(state, emit) {
+  if (!state.reasoningId || state.reasoningDone) {
+    for (const i in state.msgItemAdded) closeMessage(state, emit, i);
+    state.reasoningIndex = nextOutputIndex(state);
+    state.reasoningId = `rs_${state.responseId}_${state.reasoningIndex}`;
+    state.reasoningBuf = "";
+    state.reasoningDone = false;
+    state.reasoningPartAdded = false;
     
     emit("response.output_item.added", {
       type: "response.output_item.added",
-      output_index: idx,
+      output_index: state.reasoningIndex,
       item: { id: state.reasoningId, type: RESPONSES_ITEM.REASONING, summary: [] }
     });
 
     emit("response.reasoning_summary_part.added", {
       type: "response.reasoning_summary_part.added",
       item_id: state.reasoningId,
-      output_index: idx,
+      output_index: state.reasoningIndex,
       summary_index: 0,
       part: { type: RESPONSES_ITEM.SUMMARY_TEXT, text: "" }
     });
@@ -240,13 +277,21 @@ function closeReasoning(state, emit) {
 }
 
 function emitTextContent(state, emit, idx, content) {
+  if (state.msgItemDone[idx]) {
+    state.msgItemAdded[idx] = false;
+    state.msgContentAdded[idx] = false;
+    state.msgItemDone[idx] = false;
+    state.msgTextBuf[idx] = "";
+    delete state.msgOutputIndices[idx];
+  }
+  const outputIndex = messageOutputIndex(state, idx);
+  const msgId = `msg_${state.responseId}_${outputIndex}`;
   if (!state.msgItemAdded[idx]) {
     state.msgItemAdded[idx] = true;
-    const msgId = `msg_${state.responseId}_${idx}`;
     
     emit("response.output_item.added", {
       type: "response.output_item.added",
-      output_index: idx,
+      output_index: outputIndex,
       item: { id: msgId, type: RESPONSES_ITEM.MESSAGE, content: [], role: ROLE.ASSISTANT }
     });
   }
@@ -256,8 +301,8 @@ function emitTextContent(state, emit, idx, content) {
     
     emit("response.content_part.added", {
       type: "response.content_part.added",
-      item_id: `msg_${state.responseId}_${idx}`,
-      output_index: idx,
+      item_id: msgId,
+      output_index: outputIndex,
       content_index: 0,
       part: { type: RESPONSES_ITEM.OUTPUT_TEXT, annotations: [], logprobs: [], text: "" }
     });
@@ -265,8 +310,8 @@ function emitTextContent(state, emit, idx, content) {
 
   emit("response.output_text.delta", {
     type: "response.output_text.delta",
-    item_id: `msg_${state.responseId}_${idx}`,
-    output_index: idx,
+    item_id: msgId,
+    output_index: outputIndex,
     content_index: 0,
     delta: content,
     logprobs: []
@@ -274,18 +319,20 @@ function emitTextContent(state, emit, idx, content) {
 
   if (!state.msgTextBuf[idx]) state.msgTextBuf[idx] = "";
   state.msgTextBuf[idx] += content;
+  if (isNonEmptyString(content)) state.assistantTextSeen = true;
 }
 
 function closeMessage(state, emit, idx) {
   if (state.msgItemAdded[idx] && !state.msgItemDone[idx]) {
     state.msgItemDone[idx] = true;
     const fullText = state.msgTextBuf[idx] || "";
-    const msgId = `msg_${state.responseId}_${idx}`;
+    const outputIndex = messageOutputIndex(state, idx);
+    const msgId = `msg_${state.responseId}_${outputIndex}`;
 
     emit("response.output_text.done", {
       type: "response.output_text.done",
       item_id: msgId,
-      output_index: parseInt(idx),
+      output_index: outputIndex,
       content_index: 0,
       text: fullText,
       logprobs: []
@@ -294,7 +341,7 @@ function closeMessage(state, emit, idx) {
     emit("response.content_part.done", {
       type: "response.content_part.done",
       item_id: msgId,
-      output_index: parseInt(idx),
+      output_index: outputIndex,
       content_index: 0,
       part: { type: RESPONSES_ITEM.OUTPUT_TEXT, annotations: [], logprobs: [], text: fullText }
     });
@@ -308,11 +355,11 @@ function closeMessage(state, emit, idx) {
 
     emit("response.output_item.done", {
       type: "response.output_item.done",
-      output_index: parseInt(idx),
+      output_index: outputIndex,
       item
     });
 
-    recordCompletedOutputItem(state, parseInt(idx), item);
+    recordCompletedOutputItem(state, outputIndex, item);
   }
 }
 
@@ -334,20 +381,21 @@ function emitToolCall(state, emit, tc) {
   const newCallId = tc.id;
   const funcName = tc.function?.name;
 
-  if (funcName) state.funcNames[tcIdx] = funcName;
-  if (newCallId) state.funcCallIds[tcIdx] = newCallId;
+  if (isNonEmptyString(funcName)) state.funcNames[tcIdx] = funcName;
+  if (isNonEmptyString(newCallId)) state.funcCallIds[tcIdx] = newCallId;
 
   // Some compatible providers split the call id and function name across
   // chunks. Wait for both before deciding whether this is a custom tool;
   // otherwise an `exec` call can be irreversibly announced as function_call.
   const callId = state.funcCallIds[tcIdx];
-  if (!state.funcItemAdded[tcIdx] && callId && state.funcNames[tcIdx]) {
+  if (!state.funcItemAdded[tcIdx] && isNonEmptyString(callId) && isNonEmptyString(state.funcNames[tcIdx])) {
     state.funcItemAdded[tcIdx] = true;
     const custom = isCustomTool(state, state.funcNames[tcIdx]);
+    const outputIndex = toolOutputIndex(state, tcIdx);
 
     emit("response.output_item.added", {
       type: "response.output_item.added",
-      output_index: tcIdx,
+      output_index: outputIndex,
       item: {
         id: `${custom ? "ctc" : "fc"}_${callId}`,
         type: custom ? RESPONSES_ITEM.CUSTOM_TOOL_CALL : RESPONSES_ITEM.FUNCTION_CALL,
@@ -366,7 +414,7 @@ function emitToolCall(state, emit, tc) {
       emit("response.function_call_arguments.delta", {
         type: "response.function_call_arguments.delta",
         item_id: `fc_${refCallId}`,
-        output_index: tcIdx,
+        output_index: toolOutputIndex(state, tcIdx),
         delta: tc.function.arguments
       });
     }
@@ -379,29 +427,30 @@ function emitToolCall(state, emit, tc) {
 
 function closeToolCall(state, emit, idx) {
   const callId = state.funcCallIds[idx];
-  if (callId && !state.funcItemDone[idx]) {
+  if (callId && state.funcItemAdded?.[idx] && !state.funcItemDone[idx]) {
     const args = state.funcArgsBuf[idx] || "{}";
     const custom = isCustomTool(state, state.funcNames[idx]);
+    const outputIndex = toolOutputIndex(state, idx);
 
     if (custom) {
       const input = extractCustomToolInput(args);
       emit("response.custom_tool_call_input.delta", {
         type: "response.custom_tool_call_input.delta",
         item_id: `ctc_${callId}`,
-        output_index: parseInt(idx),
+        output_index: outputIndex,
         delta: input
       });
       emit("response.custom_tool_call_input.done", {
         type: "response.custom_tool_call_input.done",
         item_id: `ctc_${callId}`,
-        output_index: parseInt(idx),
+        output_index: outputIndex,
         input
       });
     } else {
       emit("response.function_call_arguments.done", {
         type: "response.function_call_arguments.done",
         item_id: `fc_${callId}`,
-        output_index: parseInt(idx),
+        output_index: outputIndex,
         arguments: args
       });
     }
@@ -416,11 +465,11 @@ function closeToolCall(state, emit, idx) {
 
     emit("response.output_item.done", {
       type: "response.output_item.done",
-      output_index: parseInt(idx),
+      output_index: outputIndex,
       item
     });
 
-    recordCompletedOutputItem(state, parseInt(idx), item);
+    recordCompletedOutputItem(state, outputIndex, item);
 
     state.funcItemDone[idx] = true;
     state.funcArgsDone[idx] = true;
@@ -451,22 +500,68 @@ function collectCompletedOutputItems(state) {
     .map(([, item]) => item);
 }
 
-function sendCompleted(state, emit) {
+function closeToolCalls(state, emit) {
+  const indices = Object.keys(state.funcCallIds).sort((a, b) =>
+    (state.funcOutputIndices?.[a] ?? Number.MAX_SAFE_INTEGER) -
+    (state.funcOutputIndices?.[b] ?? Number.MAX_SAFE_INTEGER)
+  );
+  for (const idx of indices) closeToolCall(state, emit, idx);
+}
+
+function sendTerminal(state, emit, status, responseFields = {}) {
   if (!state.completedSent) {
     state.completedSent = true;
-    emit("response.completed", {
-      type: "response.completed",
+    const eventType = `response.${status}`;
+    emit(eventType, {
+      type: eventType,
       response: {
         id: state.responseId,
         object: "response",
         created_at: state.created,
-        status: "completed",
+        status,
         background: false,
         error: null,
         output: collectCompletedOutputItems(state),
-        ...(state.responsesUsage ? { usage: state.responsesUsage } : {})
+        ...(state.responsesUsage ? { usage: state.responsesUsage } : {}),
+        ...responseFields
       }
     });
+  }
+}
+
+function sendCompleted(state, emit) {
+  sendTerminal(state, emit, "completed");
+}
+
+function sendIncomplete(state, emit, reason) {
+  sendTerminal(state, emit, "incomplete", {
+    incomplete_details: { reason }
+  });
+}
+
+function sendFailed(state, emit, error = {
+  type: "stream_error",
+  code: "stream_disconnected",
+  message: "stream closed before finish_reason"
+}) {
+  sendTerminal(state, emit, "failed", {
+    error
+  });
+}
+
+function sendChatFinish(state, emit) {
+  if (state.chatFinishReason === OPENAI_FINISH.LENGTH) {
+    sendIncomplete(state, emit, "max_output_tokens");
+  } else if (state.chatFinishReason === OPENAI_FINISH.CONTENT_FILTER) {
+    sendIncomplete(state, emit, "content_filter");
+  } else if (!hasAssistantOutput(state)) {
+    sendFailed(state, emit, {
+      type: "upstream_error",
+      code: "empty_output",
+      message: "upstream finished without assistant text or a tool call"
+    });
+  } else {
+    sendCompleted(state, emit);
   }
 }
 
@@ -482,8 +577,9 @@ function flushEvents(state) {
 
   for (const i in state.msgItemAdded) closeMessage(state, emit, i);
   closeReasoning(state, emit);
-  for (const i in state.funcCallIds) closeToolCall(state, emit, i);
-  sendCompleted(state, emit);
+  closeToolCalls(state, emit);
+  if (state.chatFinishReason) sendChatFinish(state, emit);
+  else sendFailed(state, emit);
   
   return events;
 }

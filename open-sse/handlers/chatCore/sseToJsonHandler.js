@@ -4,8 +4,9 @@ import { createErrorResult } from "../../utils/error.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
 import { PROVIDERS } from "../../config/providers.js";
+import { hasActionableResponsesOutput } from "../../utils/responsesStreamHelpers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
-import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
+import { ROLE, RESPONSES_ITEM, OPENAI_FINISH } from "../../translator/schema/index.js";
 
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
@@ -50,11 +51,21 @@ function extractCustomToolInput(argumentsValue) {
   return argumentsText;
 }
 
+export function hasActionableChatOutput(choice) {
+  const message = choice?.message;
+  return (typeof message?.content === "string" && message.content.trim().length > 0)
+    || (Array.isArray(message?.tool_calls) && message.tool_calls.some(
+      (call) => typeof call?.id === "string" && call.id.length > 0
+        && typeof call?.function?.name === "string" && call.function.name.trim().length > 0
+    ));
+}
+
 function chatCompletionToResponses(responseBody, customToolNames = null) {
   const choice = responseBody?.choices?.[0];
   if (!choice) return responseBody;
 
   const message = choice.message || {};
+  const customNames = customToolNames instanceof Set ? customToolNames : new Set(customToolNames || []);
   const output = [];
 
   const reasoning = message.reasoning_content || message.reasoning;
@@ -76,7 +87,7 @@ function chatCompletionToResponses(responseBody, customToolNames = null) {
 
   for (const tc of message.tool_calls || []) {
     const fn = tc.function || {};
-    const custom = customToolNames?.has(fn.name);
+    const custom = customNames.has(fn.name);
     output.push({
       type: custom ? RESPONSES_ITEM.CUSTOM_TOOL_CALL : RESPONSES_ITEM.FUNCTION_CALL,
       id: `${custom ? "ctc" : "fc"}_${tc.id || ""}`,
@@ -89,12 +100,18 @@ function chatCompletionToResponses(responseBody, customToolNames = null) {
   }
 
   const usage = responseBody.usage || {};
+  const incompleteReason = choice.finish_reason === OPENAI_FINISH.LENGTH
+    ? "max_output_tokens"
+    : choice.finish_reason === OPENAI_FINISH.CONTENT_FILTER
+      ? "content_filter"
+      : null;
   return {
     id: `resp_${responseBody.id || ""}`.replace(/^resp_chatcmpl-/, "resp_"),
     object: "response",
     created_at: responseBody.created || Math.floor(Date.now() / 1000),
     model: responseBody.model || "unknown",
-    status: "completed",
+    status: incompleteReason ? "incomplete" : "completed",
+    ...(incompleteReason ? { incomplete_details: { reason: incompleteReason } } : {}),
     background: false,
     error: null,
     output,
@@ -133,7 +150,7 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
   const contentParts = [];
   const reasoningParts = [];
   const toolCallMap = new Map(); // index -> { id, type, function: { name, arguments } }
-  let finishReason = "stop";
+  let finishReason = null;
   let usage = null;
 
   for (const chunk of chunks) {
@@ -201,6 +218,17 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
   if (isCodexResponsesApi) {
     try {
       const jsonResponse = await convertResponsesStreamToJson(providerResponse.body);
+      if (jsonResponse.status !== "completed" && jsonResponse.status !== "incomplete") {
+        appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+        return createErrorResult(
+          HTTP_STATUS.BAD_GATEWAY,
+          jsonResponse.error?.message || "Upstream Responses stream failed"
+        );
+      }
+      if (jsonResponse.status === "completed" && !hasActionableResponsesOutput(jsonResponse.output)) {
+        appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+        return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Upstream finished without assistant text or a tool call");
+      }
       if (onRequestSuccess) await onRequestSuccess();
 
       const usage = jsonResponse.usage || {};
@@ -307,6 +335,22 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         status,
         parsed.error.message || "Upstream SSE stream failed"
       );
+    }
+    const chatChoice = parsed.choices?.[0];
+    if (chatChoice?.finish_reason === "other" && Array.isArray(chatChoice.message?.tool_calls)
+      && chatChoice.message.tool_calls.some((call) => typeof call?.id === "string" && call.id.length > 0
+        && typeof call?.function?.name === "string" && call.function.name.trim())) {
+      chatChoice.finish_reason = OPENAI_FINISH.TOOL_CALLS;
+    }
+    if (!Object.values(OPENAI_FINISH).includes(chatChoice?.finish_reason)) {
+      return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Upstream SSE ended without a valid finish_reason");
+    }
+    if (
+      sourceFormat === FORMATS.OPENAI_RESPONSES
+      && [OPENAI_FINISH.STOP, OPENAI_FINISH.TOOL_CALLS].includes(chatChoice.finish_reason)
+      && !hasActionableChatOutput(chatChoice)
+    ) {
+      return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Upstream finished without assistant text or a tool call");
     }
 
     if (onRequestSuccess) await onRequestSuccess();

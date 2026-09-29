@@ -178,56 +178,83 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
   // explicit `name` field and cannot be represented as Chat Completions function declarations.
   // Filter them out to avoid sending nameless functionDeclarations to downstream providers
   // such as Gemini, which strictly validates function names.
-  const responseTools = [
-    ...(Array.isArray(body.tools) ? body.tools : []),
-    ...additionalTools,
+  // Codex groups callable tools under namespaces. Only tools loaded through
+  // additional_tools are callable when defer_loading is set.
+  const expandTools = (declarations, includeDeferred) => declarations.flatMap((group) => {
+    if (!group || typeof group !== "object") return [];
+    const isNamespace = group.type === "namespace";
+    const children = isNamespace ? (Array.isArray(group.tools) ? group.tools : []) : [group];
+    const owner = isNamespace ? group.name : null;
+    return children
+      .filter((tool) => tool && (includeDeferred || tool.defer_loading !== true))
+      .map((tool) => ({ tool, owner }));
+  });
+  const callableTools = [
+    ...expandTools(Array.isArray(body.tools) ? body.tools : [], false),
+    ...expandTools(additionalTools, true),
   ];
-  if (responseTools.length > 0) {
-    result.tools = responseTools
-      .map(tool => {
-        // Already in Chat Completions format: { type: "function", function: { name, ... } }
-        if (tool.function) return tool;
-        // Responses API function/custom tool: { type, name, description, parameters|format }.
-        // Chat Completions has no freeform custom-tool declaration, so expose custom
-        // tools as functions with one raw `input` string while retaining their names
-        // in translator-only metadata for the response conversion.
-        const name = tool.name;
-        if (!name || typeof name !== "string" || name.trim() === "") return null;
-        if (tool.type === "custom") {
-          customToolNames.add(name);
-          const formatHint = [tool.format?.syntax, tool.format?.definition].filter(Boolean).join("\n");
-          return {
-            type: OPENAI_BLOCK.FUNCTION,
-            function: {
-              name,
-              description: [String(tool.description || ""), formatHint].filter(Boolean).join("\n\n"),
-              parameters: {
-                type: "object",
-                properties: {
-                  input: {
-                    type: "string",
-                    description: "Raw freeform input for this custom tool"
-                  }
-                },
-                required: ["input"],
-                additionalProperties: false
+  const convertTool = (tool) => {
+    // Already in Chat Completions format: { type: "function", function: { name, ... } }
+    if (tool.function) return tool;
+    // Responses API function/custom tool: { type, name, description, parameters|format }.
+    // Hosted tools and namespace containers cannot become Chat functions.
+    if (tool.type && tool.type !== "function" && tool.type !== "custom") return null;
+    const name = tool.name;
+    if (!name || typeof name !== "string" || name.trim() === "") return null;
+    if (tool.type === "custom") {
+      customToolNames.add(name);
+      const formatHint = [tool.format?.syntax, tool.format?.definition].filter(Boolean).join("\n");
+      return {
+        type: OPENAI_BLOCK.FUNCTION,
+        function: {
+          name,
+          description: [String(tool.description || ""), formatHint].filter(Boolean).join("\n\n"),
+          parameters: {
+            type: "object",
+            properties: {
+              input: {
+                type: "string",
+                description: "Raw freeform input for this custom tool"
               }
-            }
-          };
-        }
-        // Responses API function tool: { type: "function", name, description, parameters }
-        // Only convert when a non-empty name is present; skip hosted tools without one.
-        return {
-          type: OPENAI_BLOCK.FUNCTION,
-          function: {
-            name,
-            description: String(tool.description || ""),
-            parameters: normalizeToolParameters(tool.parameters),
-            strict: tool.strict
+            },
+            required: ["input"],
+            additionalProperties: false
           }
-        };
-      })
-      .filter(Boolean);
+        }
+      };
+    }
+    return {
+      type: OPENAI_BLOCK.FUNCTION,
+      function: {
+        name,
+        description: String(tool.description || ""),
+        parameters: normalizeToolParameters(tool.parameters),
+        strict: tool.strict
+      }
+    };
+  };
+  if (callableTools.length > 0) {
+    result.tools = [];
+    const seenNames = new Map();
+    for (const { tool, owner } of callableTools) {
+      const converted = convertTool(tool);
+      const name = converted?.function?.name;
+      if (typeof name !== "string" || !name.trim()) continue;
+      const previous = seenNames.get(name);
+      if (previous) {
+        if (previous.owner !== owner) {
+          const error = new Error(`Ambiguous Codex tool "${name}" in namespaces "${previous.owner || "top-level"}" and "${owner || "top-level"}"`);
+          error.code = "ambiguous_namespace_tool";
+          throw error;
+        }
+        result.tools[previous.index] = converted;
+      } else {
+        seenNames.set(name, { owner, index: result.tools.length });
+        result.tools.push(converted);
+      }
+    }
+  } else if (Array.isArray(body.tools) && body.tools.length > 0) {
+    result.tools = [];
   }
   if (customToolNames.size > 0) result._customToolNames = [...customToolNames];
 
