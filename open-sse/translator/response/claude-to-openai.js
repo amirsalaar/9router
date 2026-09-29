@@ -60,10 +60,6 @@ export function claudeToOpenAIResponse(chunk, state) {
       }
       if (block?.type === CLAUDE_BLOCK.TEXT) {
         state.textBlockStarted = true;
-      } else if (block?.type === CLAUDE_BLOCK.THINKING) {
-        state.inThinkingBlock = true;
-        state.currentBlockIndex = chunk.index;
-        results.push(createChunk(state, { content: "<think>" }));
       } else if (block?.type === CLAUDE_BLOCK.TOOL_USE) {
         const toolCallIndex = state.toolCallIndex++;
         // Restore original tool name from mapping (Claude OAuth)
@@ -90,6 +86,8 @@ export function claudeToOpenAIResponse(chunk, state) {
       if (delta?.type === "text_delta" && delta.text) {
         results.push(createChunk(state, { content: delta.text }));
       } else if (delta?.type === "thinking_delta" && delta.thinking) {
+        // Thinking travels only in reasoning_content. No "<think>" markers in
+        // content: OpenAI-format clients render them as literal text.
         results.push(createChunk(state, reasoningDelta(delta.thinking)));
       } else if (delta?.type === "input_json_delta" && delta.partial_json) {
         const toolCall = state.toolCalls.get(chunk.index);
@@ -112,10 +110,6 @@ export function claudeToOpenAIResponse(chunk, state) {
       if (chunk.index === state.serverToolBlockIndex) {
         state.serverToolBlockIndex = -1;
         break;
-      }
-      if (state.inThinkingBlock && chunk.index === state.currentBlockIndex) {
-        results.push(createChunk(state, { content: "</think>" }));
-        state.inThinkingBlock = false;
       }
       state.textBlockStarted = false;
       state.thinkingBlockStarted = false;
@@ -150,6 +144,13 @@ export function claudeToOpenAIResponse(chunk, state) {
 
       if (chunk.delta?.stop_reason) {
         state.finishReason = convertStopReason(chunk.delta.stop_reason);
+        // A refusal produces no content blocks at all. Surface Anthropic's own
+        // explanation as the message text so the client shows *why* the turn is
+        // empty instead of a blank reply.
+        const refusalNote = chunk.delta.stop_reason === "refusal" && chunk.delta.stop_details?.explanation;
+        if (refusalNote) {
+          results.push(createChunk(state, { content: refusalNote }));
+        }
         const finalChunk = createChunk(state, {}, state.finishReason);
 
         if (state.usage) {
