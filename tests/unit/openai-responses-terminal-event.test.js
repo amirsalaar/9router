@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { FORMATS } from "../../open-sse/translator/formats.js";
 import { createSSETransformStreamWithLogger } from "../../open-sse/utils/stream.js";
 
-async function runTransform(input) {
+async function runTransform(input, sourceFormat = FORMATS.OPENAI_RESPONSES) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     start(controller) {
@@ -15,7 +15,7 @@ async function runTransform(input) {
   const output = stream.pipeThrough(
     createSSETransformStreamWithLogger(
       FORMATS.OPENAI_RESPONSES,
-      FORMATS.OPENAI_RESPONSES,
+      sourceFormat,
       "codex",
       null,
       null,
@@ -38,6 +38,23 @@ async function runTransform(input) {
 }
 
 describe("OpenAI Responses streaming termination", () => {
+  it.each([
+    ["max_output_tokens", "length"],
+    ["content_filter", "content_filter"],
+  ])("maps a Responses %s incomplete reason to Chat finish_reason %s", async (reason, finishReason) => {
+    const output = await runTransform([
+      `event: response.created`,
+      `data: ${JSON.stringify({ type: "response.created", response: { id: "resp_incomplete", status: "in_progress" } })}`,
+      "",
+      `event: response.incomplete`,
+      `data: ${JSON.stringify({ type: "response.incomplete", response: { id: "resp_incomplete", status: "incomplete", incomplete_details: { reason }, usage: { input_tokens: 2, output_tokens: 1 } } })}`,
+      "",
+    ].join("\n"), FORMATS.OPENAI);
+
+    expect(output).toContain(`"finish_reason":"${finishReason}"`);
+    expect(output).not.toContain('"finish_reason":"stop"');
+  });
+
   it("emits a response.failed event when a Responses stream closes before a terminal event", async () => {
     const output = await runTransform([
       `event: response.created`,
@@ -111,6 +128,51 @@ describe("OpenAI Responses streaming termination", () => {
 
     expect(output).toContain("event: response.completed");
     expect(output).not.toContain("event: response.failed");
+  });
+
+  it("preserves a native completion containing a refusal part", async () => {
+    const output = await runTransform([
+      `event: response.output_item.done`,
+      `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: { type: "message", role: "assistant", content: [{ type: "refusal", refusal: "I cannot help with that." }] } })}`,
+      "",
+      `event: response.completed`,
+      `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_refusal", status: "completed" } })}`,
+      "",
+    ].join("\n"));
+
+    expect(output).toContain("event: response.completed");
+    expect(output).not.toContain("event: response.failed");
+  });
+
+  it("preserves a native refusal delta when the terminal has no item.done event", async () => {
+    const output = await runTransform([
+      `event: response.refusal.delta`,
+      `data: ${JSON.stringify({ type: "response.refusal.delta", item_id: "msg_refusal", output_index: 0, content_index: 0, delta: "I cannot help." })}`,
+      "",
+      `event: response.completed`,
+      `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_refusal_delta", status: "completed" } })}`,
+      "",
+    ].join("\n"));
+
+    expect(output).toContain("event: response.completed");
+    expect(output).not.toContain("event: response.failed");
+  });
+
+  it("passes a native refusal delta through to a Chat client", async () => {
+    const output = await runTransform([
+      `event: response.created`,
+      `data: ${JSON.stringify({ type: "response.created", response: { id: "resp_chat_refusal", status: "in_progress" } })}`,
+      "",
+      `event: response.refusal.delta`,
+      `data: ${JSON.stringify({ type: "response.refusal.delta", item_id: "msg_refusal", output_index: 0, content_index: 0, delta: "I cannot help." })}`,
+      "",
+      `event: response.completed`,
+      `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_chat_refusal", status: "completed" } })}`,
+      "",
+    ].join("\n"), FORMATS.OPENAI);
+
+    expect(output).toContain('"refusal":"I cannot help."');
+    expect(output).toContain('"finish_reason":"stop"');
   });
 
   it("does not add response.failed when a Responses stream ended incomplete", async () => {

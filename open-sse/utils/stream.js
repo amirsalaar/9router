@@ -86,7 +86,7 @@ export function createSSEStream(options = {}) {
   let finalized = false;
 
   const formatNativeResponsesEvent = (eventName, chunk) => {
-    if (eventName === "response.output_text.delta"
+    if ((eventName === "response.output_text.delta" || eventName === "response.refusal.delta")
       && typeof chunk.delta === "string" && chunk.delta.trim()) {
       openAIResponsesHasOutput = true;
     }

@@ -30,7 +30,9 @@ export function hasActionableResponsesOutput(output) {
     if (item?.type === RESPONSES_ITEM.REASONING) return false;
     if (item?.type === RESPONSES_ITEM.MESSAGE) {
       return Array.isArray(item.content) && item.content.some(
-        (part) => typeof part?.text === "string" && part.text.trim().length > 0
+        (part) => (typeof part?.text === "string" && part.text.trim().length > 0)
+          || (part?.type === RESPONSES_ITEM.REFUSAL
+            && typeof part.refusal === "string" && part.refusal.trim().length > 0)
       );
     }
     if (item?.type === RESPONSES_ITEM.FUNCTION_CALL || item?.type === RESPONSES_ITEM.CUSTOM_TOOL_CALL) {

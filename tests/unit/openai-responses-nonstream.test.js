@@ -99,6 +99,39 @@ describe("non-stream Chat upstream for a Responses-API client (op-ericding bug)"
     expect(msg.content[0].text).toBe("hello");
   });
 
+  it("preserves a direct Chat refusal as a Responses refusal message", async () => {
+    const body = {
+      ...CHAT_TOOL_BODY,
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: null, refusal: "I cannot help with that." },
+        finish_reason: "stop",
+      }],
+    };
+
+    const result = await handleNonStreamingResponse({
+      providerResponse: new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } }),
+      provider: "op-test-chat",
+      model: "gpt-x",
+      sourceFormat: FORMATS.OPENAI_RESPONSES,
+      targetFormat: FORMATS.OPENAI,
+      body: { model: "gpt-x", input: "probe" },
+      stream: false,
+      requestStartTime: Date.now(),
+      reqLogger: { logProviderResponse: vi.fn(), logConvertedResponse: vi.fn() },
+      trackDone: vi.fn(),
+      appendLog: vi.fn(),
+    });
+
+    expect(result.success).toBe(true);
+    const json = await result.response.json();
+    expect(json.status).toBe("completed");
+    expect(json.output[0]).toMatchObject({
+      type: "message",
+      content: [{ type: "refusal", refusal: "I cannot help with that." }],
+    });
+  });
+
   it("reports a direct max-token Chat response as incomplete", () => {
     const body = {
       ...CHAT_TOOL_BODY,
@@ -306,6 +339,26 @@ describe("forced-SSE JSON path for a Responses-API client behind a chat upstream
     expect(fc.arguments).toBe("{\"cmd\":\"pwd\"}");
   });
 
+  it("preserves a streamed Chat refusal in forced-SSE JSON conversion", async () => {
+    const raw = [
+      `data: ${JSON.stringify({ id: "chatcmpl-refusal", choices: [{ index: 0, delta: { refusal: "I cannot " }, finish_reason: null }] })}`,
+      `data: ${JSON.stringify({ id: "chatcmpl-refusal", choices: [{ index: 0, delta: { refusal: "help with that." }, finish_reason: "stop" }] })}`,
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+
+    const result = await handleForcedSSEToJson(
+      sseCtx(FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI, raw)
+    );
+    expect(result.success).toBe(true);
+    const json = await result.response.json();
+    expect(json.status).toBe("completed");
+    expect(json.output[0]).toMatchObject({
+      type: "message",
+      content: [{ type: "refusal", refusal: "I cannot help with that." }],
+    });
+  });
+
   it("returns a custom_tool_call for a marked tool", async () => {
     const ctx = sseCtx(FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI);
     ctx.customToolNames = new Set(["shell"]);
@@ -419,6 +472,112 @@ describe("forced-SSE JSON path for a Responses-API client behind a chat upstream
     expect(json.status).toBe("incomplete");
     expect(json.incomplete_details).toEqual({ reason: "max_output_tokens" });
     expect(json.output[0].type).toBe("reasoning");
+  });
+
+  it.each([
+    ["max_output_tokens", "length"],
+    ["content_filter", "content_filter"],
+  ])("maps a native Responses %s incomplete result to Chat finish_reason %s", async (reason, finishReason) => {
+    const raw = nativeSSE([
+      { type: "response.created", response: { id: "resp_incomplete_chat", status: "in_progress" } },
+      {
+        type: "response.incomplete",
+        response: {
+          id: "resp_incomplete_chat",
+          status: "incomplete",
+          incomplete_details: { reason },
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "partial answer" }] }],
+        },
+      },
+    ]);
+
+    const result = await handleForcedSSEToJson(sseCtx(FORMATS.OPENAI, FORMATS.OPENAI_RESPONSES, raw));
+    expect(result.success).toBe(true);
+    const json = await result.response.json();
+    expect(json.choices[0].finish_reason).toBe(finishReason);
+    expect(json.choices[0].message.content).toBe("partial answer");
+  });
+
+  it("uses canonical output from a native Responses terminal when no item.done event arrived", async () => {
+    const raw = nativeSSE([
+      { type: "response.created", response: { id: "resp_terminal_output", status: "in_progress" } },
+      {
+        type: "response.completed",
+        response: {
+          id: "resp_terminal_output",
+          status: "completed",
+          output: [{
+            id: "msg_answer",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "answer" }],
+          }],
+          usage: { input_tokens: 4, output_tokens: 1, total_tokens: 5 },
+        },
+      },
+    ]);
+
+    const result = await handleForcedSSEToJson(
+      sseCtx(FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI_RESPONSES, raw)
+    );
+    expect(result.success).toBe(true);
+    const json = await result.response.json();
+    expect(json.status).toBe("completed");
+    expect(json.output[0]).toMatchObject({
+      type: "message",
+      content: [{ type: "output_text", text: "answer" }],
+    });
+  });
+
+  it("accepts a native Responses refusal as a completed assistant result", async () => {
+    const raw = nativeSSE([
+      { type: "response.created", response: { id: "resp_refusal", status: "in_progress" } },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "refusal", refusal: "I cannot help with that." }],
+        },
+      },
+      { type: "response.completed", response: { id: "resp_refusal", status: "completed" } },
+    ]);
+
+    const result = await handleForcedSSEToJson(
+      sseCtx(FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI_RESPONSES, raw)
+    );
+    expect(result.success).toBe(true);
+    const json = await result.response.json();
+    expect(json.status).toBe("completed");
+    expect(json.output[0].content[0]).toEqual({
+      type: "refusal",
+      refusal: "I cannot help with that.",
+    });
+  });
+
+  it("returns a native Responses refusal to a Chat JSON client", async () => {
+    const raw = nativeSSE([
+      { type: "response.created", response: { id: "resp_chat_refusal", status: "in_progress" } },
+      {
+        type: "response.completed",
+        response: {
+          id: "resp_chat_refusal",
+          status: "completed",
+          output: [{
+            type: "message",
+            role: "assistant",
+            content: [{ type: "refusal", refusal: "I cannot help with that." }],
+          }],
+        },
+      },
+    ]);
+
+    const result = await handleForcedSSEToJson(sseCtx(FORMATS.OPENAI, FORMATS.OPENAI_RESPONSES, raw));
+    expect(result.success).toBe(true);
+    const json = await result.response.json();
+    expect(json.choices[0].message.refusal).toBe("I cannot help with that.");
+    expect(json.choices[0].finish_reason).toBe("stop");
   });
 
   it("rejects a native Responses stream that closes without a terminal event", async () => {

@@ -99,12 +99,16 @@ function openAICompletionToResponses(responseBody, customToolNames = null) {
 
   // Assistant text → a message item with output_text content.
   const text = typeof message.content === "string" ? message.content : "";
+  const refusal = typeof message.refusal === "string" ? message.refusal : "";
+  const messageContent = [];
   if (text.length > 0) {
-    output.push({
-      type: RESPONSES_ITEM.MESSAGE,
-      role: ROLE.ASSISTANT,
-      content: [{ type: RESPONSES_ITEM.OUTPUT_TEXT, text, annotations: [] }],
-    });
+    messageContent.push({ type: RESPONSES_ITEM.OUTPUT_TEXT, text, annotations: [] });
+  }
+  if (refusal.length > 0) {
+    messageContent.push({ type: RESPONSES_ITEM.REFUSAL, refusal });
+  }
+  if (messageContent.length > 0) {
+    output.push({ type: RESPONSES_ITEM.MESSAGE, role: ROLE.ASSISTANT, content: messageContent });
   }
 
   // tool_calls → function_call/custom_tool_call items (Responses-native tool shape).

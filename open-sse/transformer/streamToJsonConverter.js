@@ -39,6 +39,9 @@ function processSSEMessage(msg, state) {
     if (state.status === "failed") {
       state.error = parsed.response?.error || { type: "stream_error", message: "upstream Responses stream failed" };
     }
+    if (Array.isArray(parsed.response?.output)) {
+      parsed.response.output.forEach((item, index) => state.items.set(index, item));
+    }
     if (parsed.response?.usage) {
       state.usage.input_tokens = parsed.response.usage.input_tokens || 0;
       state.usage.output_tokens = parsed.response.usage.output_tokens || 0;

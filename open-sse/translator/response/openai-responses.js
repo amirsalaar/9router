@@ -6,6 +6,7 @@ import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
 import { buildChunk } from "../concerns/chunk.js";
 import { buildUsage } from "../concerns/usage.js";
+import { responsesIncompleteToOpenAIFinish } from "../concerns/finishReason.js";
 import { fallbackToolCallId } from "../concerns/toolCall.js";
 import { reasoningDelta, extractReasoningText } from "../concerns/reasoning.js";
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM, OPENAI_FINISH, MODEL_FALLBACK } from "../schema/index.js";
@@ -132,8 +133,13 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
       // The answer starts, so thinking is over. Upstreams that send reasoning via
       // reasoning_content never emit "</think>", so close it here rather than at finish.
       closeReasoning(state, emit);
-      emitTextContent(state, emit, idx, content);
+      emitMessageContent(state, emit, idx, content, RESPONSES_ITEM.OUTPUT_TEXT);
     }
+  }
+
+  if (isNonEmptyString(delta.refusal)) {
+    closeReasoning(state, emit);
+    emitMessageContent(state, emit, idx, delta.refusal, RESPONSES_ITEM.REFUSAL);
   }
 
   // Handle tool_calls (empty array is truthy; require a real call)
@@ -189,17 +195,20 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function hasAssistantOutput(state) {
-  const hasText = state.assistantTextSeen || Object.values(state.msgTextBuf || {}).some(text =>
-    isNonEmptyString(text)
-  );
-  const hasToolCall = Object.keys(state.funcItemAdded || {}).some(idx =>
+function hasCompletedToolCall(state) {
+  return Object.keys(state.funcItemAdded || {}).some(idx =>
     state.funcItemAdded[idx] &&
     state.funcItemDone?.[idx] &&
     isNonEmptyString(state.funcCallIds?.[idx]) &&
     isNonEmptyString(state.funcNames?.[idx])
   );
-  return hasText || hasToolCall;
+}
+
+function hasAssistantOutput(state) {
+  const hasText = state.assistantTextSeen || Object.values(state.msgTextBuf || {}).some(text =>
+    isNonEmptyString(text)
+  );
+  return hasText || hasCompletedToolCall(state);
 }
 
 function startReasoning(state, emit) {
@@ -276,7 +285,17 @@ function closeReasoning(state, emit) {
   }
 }
 
-function emitTextContent(state, emit, idx, content) {
+function messageContentPart(kind, value) {
+  return kind === RESPONSES_ITEM.REFUSAL
+    ? { type: RESPONSES_ITEM.REFUSAL, refusal: value }
+    : { type: RESPONSES_ITEM.OUTPUT_TEXT, annotations: [], logprobs: [], text: value };
+}
+
+function emitMessageContent(state, emit, idx, content, kind) {
+  if (state.msgItemAdded[idx] && !state.msgItemDone[idx]
+    && state.msgContentKind?.[idx] !== kind) {
+    closeMessage(state, emit, idx);
+  }
   if (state.msgItemDone[idx]) {
     state.msgItemAdded[idx] = false;
     state.msgContentAdded[idx] = false;
@@ -284,6 +303,8 @@ function emitTextContent(state, emit, idx, content) {
     state.msgTextBuf[idx] = "";
     delete state.msgOutputIndices[idx];
   }
+  state.msgContentKind ??= {};
+  state.msgContentKind[idx] = kind;
   const outputIndex = messageOutputIndex(state, idx);
   const msgId = `msg_${state.responseId}_${outputIndex}`;
   if (!state.msgItemAdded[idx]) {
@@ -304,17 +325,18 @@ function emitTextContent(state, emit, idx, content) {
       item_id: msgId,
       output_index: outputIndex,
       content_index: 0,
-      part: { type: RESPONSES_ITEM.OUTPUT_TEXT, annotations: [], logprobs: [], text: "" }
+      part: messageContentPart(kind, "")
     });
   }
 
-  emit("response.output_text.delta", {
-    type: "response.output_text.delta",
+  const deltaEvent = kind === RESPONSES_ITEM.REFUSAL ? "response.refusal.delta" : "response.output_text.delta";
+  emit(deltaEvent, {
+    type: deltaEvent,
     item_id: msgId,
     output_index: outputIndex,
     content_index: 0,
     delta: content,
-    logprobs: []
+    ...(kind === RESPONSES_ITEM.OUTPUT_TEXT ? { logprobs: [] } : {})
   });
 
   if (!state.msgTextBuf[idx]) state.msgTextBuf[idx] = "";
@@ -328,14 +350,18 @@ function closeMessage(state, emit, idx) {
     const fullText = state.msgTextBuf[idx] || "";
     const outputIndex = messageOutputIndex(state, idx);
     const msgId = `msg_${state.responseId}_${outputIndex}`;
+    const kind = state.msgContentKind?.[idx] || RESPONSES_ITEM.OUTPUT_TEXT;
+    const part = messageContentPart(kind, fullText);
 
-    emit("response.output_text.done", {
-      type: "response.output_text.done",
+    const doneEvent = kind === RESPONSES_ITEM.REFUSAL ? "response.refusal.done" : "response.output_text.done";
+    emit(doneEvent, {
+      type: doneEvent,
       item_id: msgId,
       output_index: outputIndex,
       content_index: 0,
-      text: fullText,
-      logprobs: []
+      ...(kind === RESPONSES_ITEM.REFUSAL
+        ? { refusal: fullText }
+        : { text: fullText, logprobs: [] })
     });
 
     emit("response.content_part.done", {
@@ -343,13 +369,13 @@ function closeMessage(state, emit, idx) {
       item_id: msgId,
       output_index: outputIndex,
       content_index: 0,
-      part: { type: RESPONSES_ITEM.OUTPUT_TEXT, annotations: [], logprobs: [], text: fullText }
+      part
     });
 
     const item = {
       id: msgId,
       type: RESPONSES_ITEM.MESSAGE,
-      content: [{ type: RESPONSES_ITEM.OUTPUT_TEXT, annotations: [], logprobs: [], text: fullText }],
+      content: [part],
       role: ROLE.ASSISTANT
     };
 
@@ -550,10 +576,19 @@ function sendFailed(state, emit, error = {
 }
 
 function sendChatFinish(state, emit) {
-  if (state.chatFinishReason === OPENAI_FINISH.LENGTH) {
+  const finishReason = state.chatFinishReason === "other" && hasCompletedToolCall(state)
+    ? OPENAI_FINISH.TOOL_CALLS
+    : state.chatFinishReason;
+  if (finishReason === OPENAI_FINISH.LENGTH) {
     sendIncomplete(state, emit, "max_output_tokens");
-  } else if (state.chatFinishReason === OPENAI_FINISH.CONTENT_FILTER) {
+  } else if (finishReason === OPENAI_FINISH.CONTENT_FILTER) {
     sendIncomplete(state, emit, "content_filter");
+  } else if (finishReason !== OPENAI_FINISH.STOP && finishReason !== OPENAI_FINISH.TOOL_CALLS) {
+    sendFailed(state, emit, {
+      type: "upstream_error",
+      code: "invalid_finish_reason",
+      message: "upstream returned an unsupported finish_reason"
+    });
   } else if (!hasAssistantOutput(state)) {
     sendFailed(state, emit, {
       type: "upstream_error",
@@ -650,6 +685,15 @@ export function openaiResponsesToOpenAIResponse(chunk, state) {
     );
   }
 
+  if (eventType === "response.refusal.delta") {
+    const delta = data.delta || "";
+    if (!delta) return null;
+    return buildChunk(
+      { id: state.chatId, created: state.created, model: state.model || MODEL_FALLBACK },
+      { refusal: delta }
+    );
+  }
+
   // Text content done (ignore, we handle via delta)
   if (eventType === "response.output_text.done") {
     return null;
@@ -723,7 +767,7 @@ export function openaiResponsesToOpenAIResponse(chunk, state) {
   }
 
   // Response completed
-  if (eventType === "response.completed" || eventType === "response.done") {
+  if (eventType === "response.completed" || eventType === "response.done" || eventType === "response.incomplete") {
     // Extract usage from response.completed event
     const responseUsage = data.response?.usage;
     if (responseUsage && typeof responseUsage === "object") {
@@ -737,7 +781,10 @@ export function openaiResponsesToOpenAIResponse(chunk, state) {
     }
     
     if (!state.finishReasonSent) {
-      const finishReason = computeFinishReason(state);
+      const incomplete = eventType === "response.incomplete" || data.response?.status === "incomplete";
+      const finishReason = incomplete
+        ? responsesIncompleteToOpenAIFinish(data.response?.incomplete_details?.reason)
+        : computeFinishReason(state);
 
       state.finishReasonSent = true;
       state.finishReason = finishReason; // Mark for usage injection in stream.js

@@ -128,6 +128,55 @@ describe("Chat SSE to Responses stream integrity", () => {
     });
   });
 
+  it("fails an unsupported Chat finish reason even when answer text exists", async () => {
+    const { events } = await translateChatStream([
+      chatChunk({ content: "partial answer" }),
+      chatChunk({}, "unexpected"),
+    ]);
+
+    expect(terminalEvents(events).map(({ event }) => event)).toEqual(["response.failed"]);
+    expect(terminalEvents(events)[0].data.response.error.code).toBe("invalid_finish_reason");
+  });
+
+  it("accepts a provider's other finish when it carries a complete tool call", async () => {
+    const { events } = await translateChatStream([
+      chatChunk({ tool_calls: [{
+        index: 0,
+        id: "call_1",
+        type: "function",
+        function: { name: "search", arguments: '{"q":"hello"}' },
+      }] }),
+      chatChunk({}, "other"),
+    ]);
+
+    expect(terminalEvents(events).map(({ event }) => event)).toEqual(["response.completed"]);
+    expect(events.find(({ event }) => event === "response.output_item.done").data.item.name).toBe("search");
+  });
+
+  it("emits a Responses refusal item for streamed Chat refusal deltas", async () => {
+    const { wire, events } = await translateChatStream([
+      chatChunk({ refusal: "I cannot " }),
+      chatChunk({ refusal: "help with that." }, "stop"),
+    ]);
+
+    expect(terminalEvents(events).map(({ event }) => event)).toEqual(["response.completed"]);
+    expect(events
+      .filter(({ event }) => event === "response.refusal.delta")
+      .map(({ data }) => data.delta).join("")).toBe("I cannot help with that.");
+    expect(events.some(({ event }) => event === "response.output_text.delta")).toBe(false);
+    expect(events.find(({ event }) => event === "response.output_item.done").data.item).toMatchObject({
+      type: "message",
+      content: [{ type: "refusal", refusal: "I cannot help with that." }],
+    });
+
+    const assembled = await convertResponsesStreamToJson(new Response(wire).body);
+    expect(assembled.status).toBe("completed");
+    expect(assembled.output[0].content[0]).toEqual({
+      type: "refusal",
+      refusal: "I cannot help with that.",
+    });
+  });
+
   it("preserves reasoning, answer text, and parallel tool calls at stable distinct output indices", async () => {
     const searchArgs = '{"q":"ok"}';
     const customArgs = '{"input":"return 1;"}';
