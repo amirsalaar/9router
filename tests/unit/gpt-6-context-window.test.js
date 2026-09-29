@@ -34,6 +34,23 @@ describe("gpt-6 / gpt-5.4+ context windows", () => {
     expect(getCapabilitiesForModel("codex", "gpt-6-astra").contextWindow).toBe(272000);
   });
 
+  it("keeps Devin CLI's seven GPT-5.4/5.5 variants at the gateway's 200k limit", () => {
+    for (const model of [
+      "gpt-5.4-high", "gpt-5.4-medium", "gpt-5.4-low",
+      "gpt-5.5-xhigh", "gpt-5.5-high", "gpt-5.5-medium", "gpt-5.5-low",
+    ]) {
+      expect(getCapabilitiesForModel("devin-cli", model), model).toMatchObject({
+        contextWindow: 200000,
+        maxOutput: 128000,
+        vision: true,
+        reasoning: true,
+        thinkingFormat: "openai",
+      });
+    }
+    expect(getCapabilitiesForModel("dv", "gpt-5.5-high").contextWindow).toBe(200000);
+    expect(getCapabilitiesForModel("devin", "gpt-5.5-high").contextWindow).toBe(200000);
+  });
+
   // gpt-5.4 is where the 1.05M window starts and the mini/nano tiers are the
   // exception that stayed at 400k. Pattern resolution is first-match-wins, so this
   // is really a guard on the ORDER of the entries: move the tier patterns above
