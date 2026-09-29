@@ -17,6 +17,11 @@ for (const entry of REGISTRY) {
   for (const a of entry.aliases || []) ALIAS_TO_PROVIDER_ID[a] = entry.id;
 }
 
+const OPENAI_CATALOG_IDS = new Set(
+  (REGISTRY.find((entry) => entry.id === "openai")?.models || [])
+    .map((model) => model.id.toLowerCase()),
+);
+
 const BUILTIN_MODEL_ALIASES = {
   "grok-build": "gcli/grok-build",
 };
@@ -145,8 +150,8 @@ const MODEL_PREFIX_PROVIDERS = [
   [/^gemini-/, "gemini"],
   // Codex CLI's automatic approval review sends a bare Copilot-only id (gpt-5.6-luna), which
   // fell through to the openai default and 404'd on a setup with no openai connection.
-  // openai's own gpt-5 line stops at 5.4, so 5.5+ and gpt-6+ are Copilot-only and safe to
-  // claim here; 5.4 and below must stay on openai. Precedes the generic gpt-* rule.
+  // Uncatalogued 5.5+ and gpt-6+ names go to Copilot. The OpenAI catalog takes
+  // precedence below, so new OpenAI releases cannot be stolen by this pattern.
   [/^gpt-(5\.[5-9]|[6-9])/, "github"],
   [/^gpt-/, "openai"],
   [/^o[134]/, "openai"],
@@ -160,5 +165,7 @@ const MODEL_PREFIX_PROVIDERS = [
 function inferProviderFromModelName(modelName) {
   if (!modelName) return "openai";
   const m = modelName.toLowerCase();
+  const baseModel = m.replace(/\([^()]+\)\s*$/, "").trim();
+  if (OPENAI_CATALOG_IDS.has(baseModel)) return "openai";
   return MODEL_PREFIX_PROVIDERS.find(([re]) => re.test(m))?.[1] || "openai";
 }
