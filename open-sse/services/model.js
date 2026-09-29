@@ -22,6 +22,10 @@ const OPENAI_CATALOG_IDS = new Set(
     .map((model) => model.id.toLowerCase()),
 );
 
+// Codex Guardian has sent this bare id through a Copilot-only connection. Do not infer
+// other GPT ids from version numbers: the OpenAI registry can omit valid OpenAI models.
+const COPILOT_BARE_MODEL_IDS = new Set(["gpt-5.6-luna"]);
+
 const BUILTIN_MODEL_ALIASES = {
   "grok-build": "gcli/grok-build",
 };
@@ -137,11 +141,6 @@ const MODEL_PREFIX_PROVIDERS = [
   // so bare usage without a provider/ prefix must route to bedrock, not fall through to openai.
   [/^(us|eu|ap|global)\.(anthropic|meta|amazon|mistral|xai)\./, "bedrock"],
   [/^gemini-/, "gemini"],
-  // Codex CLI's automatic approval review sends a bare Copilot-only id (gpt-5.6-luna), which
-  // fell through to the openai default and 404'd on a setup with no openai connection.
-  // Uncatalogued 5.5+ and gpt-6+ names go to Copilot. The OpenAI catalog takes
-  // precedence below, so new OpenAI releases cannot be stolen by this pattern.
-  [/^gpt-(5\.[5-9]|[6-9])/, "github"],
   [/^gpt-/, "openai"],
   [/^o[134]/, "openai"],
   [/^deepseek-/, "openrouter"],
@@ -156,5 +155,6 @@ function inferProviderFromModelName(modelName) {
   const m = modelName.toLowerCase();
   const baseModel = m.replace(/\([^()]+\)\s*$/, "").trim();
   if (OPENAI_CATALOG_IDS.has(baseModel)) return "openai";
+  if (COPILOT_BARE_MODEL_IDS.has(baseModel)) return "github";
   return MODEL_PREFIX_PROVIDERS.find(([re]) => re.test(m))?.[1] || "openai";
 }
