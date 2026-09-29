@@ -1,8 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { openaiToOpenAIResponsesRequest } from "../../open-sse/translator/request/openai-responses.js";
-import { translateNonStreamingResponse } from "../../open-sse/handlers/chatCore/nonStreamingHandler.js";
+import { handleNonStreamingResponse, translateNonStreamingResponse } from "../../open-sse/handlers/chatCore/nonStreamingHandler.js";
 import { applyThinking } from "../../open-sse/translator/concerns/thinkingUnified.js";
+
+vi.mock("@/lib/usageDb.js", () => ({
+  appendRequestLog: vi.fn(async () => {}),
+  saveRequestDetail: vi.fn(async () => {}),
+  saveRequestUsage: vi.fn(async () => {}),
+}));
 
 // A chat-format client talking to a Responses-wire provider (azure apiType:"responses",
 // openai-compatible-responses nodes) used to get `content: ""` back: the request
@@ -34,6 +40,27 @@ describe("openai ↔ openai-responses non-streaming round trip", () => {
       output_tokens_details: { reasoning_tokens: 0 },
     },
   };
+
+  async function emitNonStreamingChat(responseBody) {
+    const result = await handleNonStreamingResponse({
+      providerResponse: new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+      provider: "azure",
+      model: "gpt-6-luna",
+      sourceFormat: "openai",
+      targetFormat: "openai-responses",
+      body: { stream: false },
+      stream: false,
+      requestStartTime: Date.now(),
+      reqLogger: { logProviderResponse() {}, logConvertedResponse() {} },
+      trackDone() {},
+      appendLog() {},
+    });
+    expect(result.success).toBe(true);
+    return result.response.json();
+  }
 
   describe("request", () => {
     it("honors a non-streaming caller", () => {
@@ -101,6 +128,34 @@ describe("openai ↔ openai-responses non-streaming round trip", () => {
         ...azureBody,
         status: "incomplete",
         incomplete_details: { reason: "max_output_tokens" },
+      }, "openai-responses", "openai");
+      expect(out.choices[0].finish_reason).toBe("length");
+    });
+
+    it.each([
+      ["max_output_tokens", "length"],
+      ["content_filter", "content_filter"],
+    ])("does not expose an incomplete %s function call as executable", async (reason, finishReason) => {
+      const out = await emitNonStreamingChat({
+        ...azureBody,
+        status: "incomplete",
+        incomplete_details: { reason },
+        output: [{
+          type: "function_call",
+          call_id: "call_partial",
+          name: "shell",
+          arguments: "{\"command\":\"rm",
+        }],
+      });
+      expect(out.choices[0].finish_reason).toBe(finishReason);
+      expect(out.choices[0].message.tool_calls).toBeUndefined();
+    });
+
+    it("treats an incomplete response without details as truncated", () => {
+      const out = translateNonStreamingResponse({
+        ...azureBody,
+        status: "incomplete",
+        incomplete_details: null,
       }, "openai-responses", "openai");
       expect(out.choices[0].finish_reason).toBe("length");
     });
