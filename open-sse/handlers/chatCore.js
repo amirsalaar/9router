@@ -199,6 +199,19 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         };
         delete translatedBody.reasoning_effort;
       }
+      if (Array.isArray(translatedBody.input)) {
+        translatedBody.input = translatedBody.input.map(item => {
+          if (!item || typeof item !== "object") return item;
+          let modified = item;
+          if ((item.type === "function_call" || item.type === "custom_tool_call") && typeof item.name === "string" && !/^[a-zA-Z0-9_-]+$/.test(item.name)) {
+            modified = { ...modified, name: item.name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128) };
+          }
+          if (item.call && typeof item.call.name === "string" && !/^[a-zA-Z0-9_-]+$/.test(item.call.name)) {
+            modified = { ...modified, call: { ...item.call, name: item.call.name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128) } };
+          }
+          return modified;
+        });
+      }
     }
     // Normalize newer Cowork/CC beta shapes (adaptive thinking, mid-conversation system) the API rejects
     if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model);
