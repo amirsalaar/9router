@@ -87,6 +87,9 @@ function normalizeCodexTools(body) {
     if (type === "namespace") {
       if (Array.isArray(tool.tools)) {
         for (const st of tool.tools) {
+          if (typeof st?.name === "string" && !/^[a-zA-Z0-9_-]+$/.test(st.name)) {
+            st.name = st.name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
+          }
           const n = typeof st?.name === "string" ? st.name.trim().slice(0, 128) : "";
           if (n) validNames.add(n);
           if (st?.parameters && typeof st.parameters === "object") {
@@ -103,8 +106,11 @@ function normalizeCodexTools(body) {
     }
     const fn = tool.function && typeof tool.function === "object" && !Array.isArray(tool.function) ? tool.function : null;
     const rawName = typeof tool.name === "string" ? tool.name : (typeof fn?.name === "string" ? fn.name : "");
-    const name = rawName.trim();
+    let name = rawName.trim();
     if (!name) return false;
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      name = name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
+    }
     const description = typeof tool.description === "string" ? tool.description : (typeof fn?.description === "string" ? fn.description : "");
     const parameters = (tool.parameters && typeof tool.parameters === "object" && !Array.isArray(tool.parameters))
       ? tool.parameters
@@ -427,6 +433,19 @@ export class CodexExecutor extends BaseExecutor {
 
     // Keep system prompts in body.input as role=developer so they stay in the cacheable prefix
     convertSystemToDeveloperRole(body);
+    if (Array.isArray(body.input)) {
+      body.input = body.input.map(item => {
+        if (!item || typeof item !== "object") return item;
+        let modified = item;
+        if ((item.type === "function_call" || item.type === "custom_tool_call") && typeof item.name === "string" && !/^[a-zA-Z0-9_-]+$/.test(item.name)) {
+          modified = { ...modified, name: item.name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128) };
+        }
+        if (item.call && typeof item.call.name === "string" && !/^[a-zA-Z0-9_-]+$/.test(item.call.name)) {
+          modified = { ...modified, call: { ...item.call, name: item.call.name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128) } };
+        }
+        return modified;
+      });
+    }
     // Strip server-generated item IDs (rs_/fc_/resp_/msg_) — Codex /responses can't resolve when store=false
     stripStoredItemReferences(body, responsesLite);
     // Flatten function tools + drop unsupported types

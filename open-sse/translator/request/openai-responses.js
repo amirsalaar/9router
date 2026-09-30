@@ -17,6 +17,13 @@ import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM } from "../schema/index.js";
 const MAX_TOOL_NAME_LEN = 128;
 const MAX_CHAT_TOOL_NAME_LEN = 64;
 
+export function sanitizeResponsesToolName(name) {
+  if (typeof name !== "string") return "";
+  const trimmed = name.trim();
+  if (!trimmed) return "";
+  return trimmed.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, MAX_TOOL_NAME_LEN);
+}
+
 /**
  * Convert OpenAI Responses API request to OpenAI Chat Completions format
  */
@@ -241,12 +248,13 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
       const converted = convertTool(tool);
       const name = converted?.function?.name;
       if (typeof name !== "string" || !name.trim()) continue;
-      const originalName = owner === null ? name : `${owner}.${name}`;
+      const originalName = owner === null ? name : `${owner}__${name}`.replace(/[^A-Za-z0-9_-]/g, '_');
       const entry = { converted, name, owner, originalName, custom: tool.type === "custom" };
-      const previousIndex = seenIdentities.get(originalName);
+      const declarationKey = `${owner ?? ""}::${name}`;
+      const previousIndex = seenIdentities.get(declarationKey);
       if (previousIndex !== undefined) declarations[previousIndex] = entry;
       else {
-        seenIdentities.set(originalName, declarations.length);
+        seenIdentities.set(declarationKey, declarations.length);
         declarations.push(entry);
       }
     }
@@ -258,9 +266,9 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
     const originalToAlias = new Map();
     const toolNameMap = new Map();
     result.tools = declarations.map(({ converted, name, owner, originalName, custom }) => {
-      let sentName = name;
+      let sentName = originalName;
       if (owner !== null) {
-        const base = `${owner}__${name}`.replace(/[^A-Za-z0-9_-]/g, "_");
+        const base = originalName;
         sentName = base.slice(0, MAX_CHAT_TOOL_NAME_LEN);
         for (let suffix = 2; usedNames.has(sentName); suffix++) {
           const disambiguator = `_${suffix}`;
@@ -270,6 +278,9 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
         toolNameMap.set(sentName, originalName);
       }
       originalToAlias.set(originalName, sentName);
+      if (owner !== null) {
+        originalToAlias.set(`${owner}.${name}`, sentName);
+      }
       if (custom) customToolNames.add(sentName);
       return { ...converted, function: { ...converted.function, name: sentName } };
     });
@@ -278,7 +289,11 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
       if (message.role !== ROLE.ASSISTANT || !Array.isArray(message.tool_calls)) continue;
       for (const call of message.tool_calls) {
         const originalName = call.function?.name;
-        if (originalToAlias.has(originalName)) call.function.name = originalToAlias.get(originalName);
+        if (originalToAlias.has(originalName)) {
+          call.function.name = originalToAlias.get(originalName);
+        } else if (typeof call.function?.name === "string" && !/^[a-zA-Z0-9_-]+$/.test(call.function.name)) {
+          call.function.name = call.function.name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, MAX_CHAT_TOOL_NAME_LEN);
+        }
       }
     }
     const selectedName = result.tool_choice?.function?.name || result.tool_choice?.name;
@@ -396,6 +411,43 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
     }
     delete out.max_tokens;
     delete out.max_completion_tokens;
+    const toolNameMap = new Map();
+    if (Array.isArray(out.input)) {
+      out.input = out.input.map(item => {
+        if (!item || typeof item !== "object") return item;
+        let modified = item;
+        if (item.type === RESPONSES_ITEM.FUNCTION_CALL || item.type === "custom_tool_call") {
+          if (typeof item.name === "string" && !/^[a-zA-Z0-9_-]+$/.test(item.name)) {
+            modified = { ...modified, name: sanitizeResponsesToolName(item.name) };
+          }
+        }
+        if (item.call && typeof item.call.name === "string" && !/^[a-zA-Z0-9_-]+$/.test(item.call.name)) {
+          modified = { ...modified, call: { ...item.call, name: sanitizeResponsesToolName(item.call.name) } };
+        }
+        return modified;
+      });
+    }
+    if (Array.isArray(out.tools)) {
+      out.tools = out.tools.map(tool => {
+        if (!tool || typeof tool !== "object") return tool;
+        if (tool.type === OPENAI_BLOCK.FUNCTION) {
+          const rawName = typeof tool.function?.name === "string" ? tool.function.name : tool.name;
+          if (typeof rawName === "string" && !/^[a-zA-Z0-9_-]+$/.test(rawName)) {
+            const sanitized = sanitizeResponsesToolName(rawName);
+            toolNameMap.set(sanitized, rawName);
+            if (tool.function) return { ...tool, function: { ...tool.function, name: sanitized } };
+            return { ...tool, name: sanitized };
+          }
+        }
+        if (tool.type === "custom" && typeof tool.name === "string" && !/^[a-zA-Z0-9_-]+$/.test(tool.name)) {
+          const sanitized = sanitizeResponsesToolName(tool.name);
+          toolNameMap.set(sanitized, tool.name);
+          return { ...tool, name: sanitized };
+        }
+        return tool;
+      });
+    }
+    if (toolNameMap.size > 0) out._toolNameMap = toolNameMap;
     return out;
   }
 
@@ -472,7 +524,7 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
         result.input.push({
           type: RESPONSES_ITEM.FUNCTION_CALL,
           call_id: clampResponsesCallId(tc.id),
-          name: name.slice(0, MAX_TOOL_NAME_LEN),
+          name: sanitizeResponsesToolName(name),
           arguments: coerceResponsesArguments(tc.function?.arguments)
         });
       }
@@ -494,23 +546,37 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   }
 
   // Convert tools format
+  const responsesToolNameMap = new Map();
   if (body.tools && Array.isArray(body.tools)) {
     result.tools = body.tools.map(tool => {
       if (tool.type === OPENAI_BLOCK.FUNCTION) {
         // Strict upstreams reject nameless/overlong tool declarations
-        const name = typeof tool.function?.name === "string" ? tool.function.name.trim() : "";
+        const name = typeof tool.function?.name === "string" ? tool.function.name.trim() : (typeof tool.name === "string" ? tool.name.trim() : "");
         if (!name) return null;
+        const sanitized = sanitizeResponsesToolName(name);
+        if (sanitized !== name) responsesToolNameMap.set(sanitized, name);
+        const description = String(tool.function?.description ?? tool.description ?? "");
+        const parameters = normalizeToolParameters(tool.function?.parameters ?? tool.parameters);
+        const strict = tool.function?.strict ?? tool.strict;
         return {
           type: OPENAI_BLOCK.FUNCTION,
-          name: name.slice(0, MAX_TOOL_NAME_LEN),
-          description: String(tool.function.description || ""),
-          parameters: normalizeToolParameters(tool.function.parameters),
-          strict: tool.function.strict
+          name: sanitized,
+          description,
+          parameters,
+          strict
         };
+      }
+      if (tool.type === "custom") {
+        const name = typeof tool.name === "string" ? tool.name.trim() : "";
+        if (!name) return null;
+        const sanitized = sanitizeResponsesToolName(name);
+        if (sanitized !== name) responsesToolNameMap.set(sanitized, name);
+        return { ...tool, name: sanitized };
       }
       return tool;
     }).filter(Boolean);
   }
+  if (responsesToolNameMap.size > 0) result._toolNameMap = responsesToolNameMap;
 
   // Pass through other relevant fields
   if (body.temperature !== undefined) result.temperature = body.temperature;

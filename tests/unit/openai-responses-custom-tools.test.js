@@ -85,7 +85,7 @@ describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
       "functions__exec_command",
       "functions__write_stdin",
     ]);
-    expect(out._toolNameMap.get("mcp__cua_repl__js")).toBe("mcp__cua_repl.js");
+    expect(out._toolNameMap.get("mcp__cua_repl__js")).toBe("mcp__cua_repl__js");
     expect(out.tools.find((tool) => tool.function.name === "functions__exec_command").function.parameters).toEqual({
       type: "object",
       properties: { cmd: { type: "string" } },
@@ -133,7 +133,7 @@ describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
       tools: [DEFERRED_GROUP],
     }, true, null);
     expect(after.tools.map((tool) => tool.function.name)).toEqual(["mcp__prod__list_ai_investigations"]);
-    expect(after._toolNameMap.get("mcp__prod__list_ai_investigations")).toBe("mcp__prod.list_ai_investigations");
+    expect(after._toolNameMap.get("mcp__prod__list_ai_investigations")).toBe("mcp__prod__list_ai_investigations");
   });
 
   it("advertises same-named children from different namespaces as distinct callable tools", () => {
@@ -147,8 +147,8 @@ describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
       "mcp__node_repl__js",
     ]);
     expect([...out._toolNameMap]).toEqual([
-      ["mcp__cua_repl__js", "mcp__cua_repl.js"],
-      ["mcp__node_repl__js", "mcp__node_repl.js"],
+      ["mcp__cua_repl__js", "mcp__cua_repl__js"],
+      ["mcp__node_repl__js", "mcp__node_repl__js"],
     ]);
   });
 
@@ -183,7 +183,7 @@ describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
     expect(names[0]).toBe("mcp__cua_repl__js");
     expect(new Set(names).size).toBe(names.length);
     expect(names.every((name) => /^[A-Za-z0-9_-]{1,64}$/.test(name))).toBe(true);
-    expect(out._toolNameMap.get(names[1])).toBe("mcp__cua_repl.js");
+    expect(out._toolNameMap.get(names[1])).toBe("mcp__cua_repl__js");
   });
 
   it("preserves namespace restoration through a Claude request pivot", () => {
@@ -196,8 +196,8 @@ describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
       "mcp__cua_repl__js",
       "mcp__node_repl__js",
     ]);
-    expect(out._toolNameMap.get("mcp__cua_repl__js")).toBe("mcp__cua_repl.js");
-    expect(out._toolNameMap.get("mcp__node_repl__js")).toBe("mcp__node_repl.js");
+    expect(out._toolNameMap.get("mcp__cua_repl__js")).toBe("mcp__cua_repl__js");
+    expect(out._toolNameMap.get("mcp__node_repl__js")).toBe("mcp__node_repl__js");
   });
 
   it("restores qualified names in streamed tool events and terminal output", () => {
@@ -223,9 +223,9 @@ describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
     ].flatMap((chunk) => translateResponse(FORMATS.OPENAI, FORMATS.OPENAI_RESPONSES, chunk, state));
 
     const toolEvents = events.filter((event) => event.event === "response.output_item.added" || event.event === "response.output_item.done");
-    expect(toolEvents.map((event) => event.data.item.name)).toEqual(["mcp__node_repl.js", "mcp__node_repl.js"]);
-    expect(events.find((event) => event.event === "response.completed").data.response.output[0].name).toBe("mcp__node_repl.js");
-    expect(restoreToolNames({ output: [{ type: "function_call", name: alias }] }, request._toolNameMap).output[0].name).toBe("mcp__node_repl.js");
+    expect(toolEvents.map((event) => event.data.item.name)).toEqual(["mcp__node_repl__js", "mcp__node_repl__js"]);
+    expect(events.find((event) => event.event === "response.completed").data.response.output[0].name).toBe("mcp__node_repl__js");
+    expect(restoreToolNames({ output: [{ type: "function_call", name: alias }] }, request._toolNameMap).output[0].name).toBe("mcp__node_repl__js");
   });
 
   it("translates custom tool call/output history into Chat assistant/tool messages", () => {
