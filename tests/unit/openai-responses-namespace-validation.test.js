@@ -76,6 +76,6 @@ describe("Codex namespace routing through chat core", () => {
     ]);
     expect(result.success).toBe(true);
     const json = await result.response.json();
-    expect(json.output.find((item) => item.type === "function_call").name).toBe("mcp__node_repl.js");
+    expect(json.output.find((item) => item.type === "function_call").name).toBe("mcp__node_repl__js");
   });
 });
