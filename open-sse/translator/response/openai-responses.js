@@ -211,6 +211,12 @@ function hasCompletedToolCall(state) {
   );
 }
 
+function hasIncompleteToolCall(state) {
+  return [...(state.seenFuncIndices || [])].some(idx =>
+    !isNonEmptyString(state.funcCallIds?.[idx]) || !isNonEmptyString(state.funcNames?.[idx])
+  );
+}
+
 function hasAssistantOutput(state) {
   const hasText = state.assistantTextSeen || Object.values(state.msgTextBuf || {}).some(text =>
     isNonEmptyString(text)
@@ -411,6 +417,8 @@ function extractCustomToolInput(argumentsText) {
 
 function emitToolCall(state, emit, tc) {
   const tcIdx = tc.index ?? 0;
+  state.seenFuncIndices ??= new Set();
+  state.seenFuncIndices.add(tcIdx);
   const newCallId = tc.id;
   const funcName = tc.function?.name;
 
@@ -601,6 +609,12 @@ function sendChatFinish(state, emit) {
       type: "upstream_error",
       code: "empty_output",
       message: "upstream finished without assistant text or a tool call"
+    });
+  } else if (hasIncompleteToolCall(state)) {
+    sendFailed(state, emit, {
+      type: "upstream_error",
+      code: "invalid_tool_call",
+      message: "upstream returned a tool call without a valid ID or name"
     });
   } else {
     sendCompleted(state, emit);

@@ -25,6 +25,14 @@ export function isOpenAIResponsesTerminalEvent(eventName, chunk) {
   return status === "completed" || status === "incomplete" || status === "failed";
 }
 
+export function hasInvalidResponsesToolCalls(output) {
+  return Array.isArray(output) && output.some((item) =>
+    (item?.type === RESPONSES_ITEM.FUNCTION_CALL || item?.type === RESPONSES_ITEM.CUSTOM_TOOL_CALL)
+      && (typeof item.name !== "string" || !item.name.trim()
+        || typeof item.call_id !== "string" || !item.call_id.trim())
+  );
+}
+
 export function hasActionableResponsesOutput(output) {
   return Array.isArray(output) && output.some((item) => {
     if (item?.type === RESPONSES_ITEM.REASONING) return false;
@@ -37,7 +45,7 @@ export function hasActionableResponsesOutput(output) {
     }
     if (item?.type === RESPONSES_ITEM.FUNCTION_CALL || item?.type === RESPONSES_ITEM.CUSTOM_TOOL_CALL) {
       return typeof item.name === "string" && item.name.trim().length > 0
-        && typeof item.call_id === "string" && item.call_id.length > 0;
+        && typeof item.call_id === "string" && item.call_id.trim().length > 0;
     }
     return !!item?.type;
   });

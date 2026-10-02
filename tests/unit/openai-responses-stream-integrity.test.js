@@ -106,6 +106,20 @@ describe("Chat SSE to Responses stream integrity", () => {
     });
   });
 
+  it.each([
+    ["a blank name", { index: 0, id: "call_bad", type: "function", function: { name: "", arguments: "{}" } }],
+    ["a missing call ID", { index: 0, type: "function", function: { name: "lookup", arguments: "{}" } }],
+  ])("fails a mixed Chat stream containing a tool call with %s", async (_case, badCall) => {
+    const { events } = await translateChatStream([
+      chatChunk({ content: "answer" }),
+      chatChunk({ tool_calls: [badCall] }),
+      chatChunk({}, "stop"),
+    ]);
+
+    expect(terminalEvents(events).map(({ event }) => event)).toEqual(["response.failed"]);
+    expect(terminalEvents(events)[0].data.response.error.code).toBe("invalid_tool_call");
+  });
+
   it("recognizes an explicit stop on tagged reasoning as empty output", async () => {
     const { events } = await translateChatStream([
       chatChunk({ content: "<think>thinking" }, "stop"),

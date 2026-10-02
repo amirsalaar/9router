@@ -120,6 +120,49 @@ describe("OpenAI Responses streaming termination", () => {
     expect(output).toContain("data: [DONE]");
   });
 
+  it.each([
+    ["function call without an ID", { type: "function_call", call_id: "", name: "search", arguments: "{}" }],
+    ["custom call without a name", { type: "custom_tool_call", call_id: "call_exec", name: " ", input: "run" }],
+  ])("fails a native completion with assistant text and a %s", async (_case, badCall) => {
+    const output = await runTransform([
+      "event: response.output_item.done",
+      `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] } })}`,
+      "",
+      "event: response.output_item.done",
+      `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 1, item: badCall })}`,
+      "",
+      "event: response.completed",
+      `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_mixed", status: "completed" } })}`,
+      "",
+    ].join("\n"));
+
+    expect(output).toContain("event: response.failed");
+    expect(output).toContain('"code":"invalid_tool_call"');
+    expect(output).not.toContain("event: response.completed");
+  });
+
+  it("checks malformed calls carried only in the native terminal output", async () => {
+    const output = await runTransform([
+      "event: response.completed",
+      `data: ${JSON.stringify({
+        type: "response.completed",
+        response: {
+          id: "resp_terminal_calls",
+          status: "completed",
+          output: [
+            { type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] },
+            { type: "function_call", call_id: "call_bad", name: "" },
+          ],
+        },
+      })}`,
+      "",
+    ].join("\n"));
+
+    expect(output).toContain("event: response.failed");
+    expect(output).toContain('"code":"invalid_tool_call"');
+    expect(output).not.toContain("event: response.completed");
+  });
+
   it("turns a native reasoning-only completion into an explicit failure", async () => {
     const output = await runTransform([
       `event: response.output_item.done`,

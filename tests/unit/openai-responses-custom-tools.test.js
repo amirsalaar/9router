@@ -186,6 +186,43 @@ describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
     expect(out._toolNameMap.get(names[1])).toBe("mcp__cua_repl__js");
   });
 
+  it("allocates distinct Chat aliases for colliding top-level names", () => {
+    const declaration = (name) => ({ type: "function", name, parameters: { type: "object", properties: {} } });
+    const out = openaiResponsesToOpenAIRequest("test", {
+      input: [
+        { type: "function_call", call_id: "call_dot", name: "foo.bar", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_dot", output: "ok" },
+        { type: "function_call", call_id: "call_slash", name: "foo/bar", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_slash", output: "ok" },
+      ],
+      tools: [declaration("foo_bar"), declaration("foo.bar"), declaration("foo/bar")],
+      tool_choice: { type: "function", name: "foo.bar" },
+    }, true, null);
+
+    expect(out.tools.map((tool) => tool.function.name)).toEqual(["foo_bar", "foo_bar_2", "foo_bar_3"]);
+    expect(out.messages.flatMap((message) => message.tool_calls || []).map((call) => call.function.name))
+      .toEqual(["foo_bar_2", "foo_bar_3"]);
+    expect(out.tool_choice).toEqual({ type: "function", function: { name: "foo_bar_2" } });
+    expect(out._toolNameMap.get("foo_bar_2")).toBe("foo.bar");
+    expect(out._toolNameMap.get("foo_bar_3")).toBe("foo/bar");
+  });
+
+  it("limits top-level Chat aliases to 64 characters across history and tool choice", () => {
+    const longName = "long_top_level_tool_".repeat(4);
+    const out = openaiResponsesToOpenAIRequest("test", {
+      input: [{ type: "function_call", call_id: "call_long", name: longName, arguments: "{}" }],
+      tools: [{ type: "custom", name: longName, format: { type: "text" } }],
+      tool_choice: { type: "function", name: longName },
+    }, true, null);
+
+    const alias = out.tools[0].function.name;
+    expect(alias).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
+    expect(out.messages.find((message) => message.role === "assistant").tool_calls[0].function.name).toBe(alias);
+    expect(out.tool_choice.function.name).toBe(alias);
+    expect(out._customToolNames).toEqual([alias]);
+    expect(out._toolNameMap.get(alias)).toBe(longName);
+  });
+
   it("preserves namespace restoration through a Claude request pivot", () => {
     const out = translateRequest(FORMATS.OPENAI_RESPONSES, FORMATS.CLAUDE, "claude-sonnet-4", {
       input: "Run JS",

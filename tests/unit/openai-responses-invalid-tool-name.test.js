@@ -4,7 +4,7 @@ import {
   openaiToOpenAIResponsesRequest,
   openaiResponsesToOpenAIRequest,
 } from "../../open-sse/translator/request/openai-responses.js";
-import { restoreToolNames } from "../../open-sse/utils/opencodeFingerprint.js";
+import { restoreToolNames, takeRenamedToolNames } from "../../open-sse/utils/opencodeFingerprint.js";
 
 const OPENAI_TOOL_NAME_REGEX = /^[a-zA-Z0-9_-]+$/;
 
@@ -108,6 +108,72 @@ describe("OpenAI Responses tool name sanitization", () => {
       out._toolNameMap
     );
     expect(restored.output[0].name).toBe("mcp__node_repl.js");
+  });
+
+  it("keeps already-Responses declarations and history distinct after sanitization", () => {
+    const body = {
+      input: [
+        { type: "function_call", call_id: "call_dot", name: "foo.bar", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_dot", output: "ok" },
+        { type: "custom_tool_call", call_id: "call_slash", name: "foo/bar", input: "run" },
+        { type: "custom_tool_call_output", call_id: "call_slash", output: "ok" },
+      ],
+      tools: [
+        { type: "function", name: "foo_bar", parameters: { type: "object", properties: {} } },
+        { type: "function", name: "foo.bar", parameters: { type: "object", properties: {} } },
+        { type: "custom", name: "foo/bar", format: { type: "text" } },
+      ],
+      tool_choice: { type: "function", name: "foo.bar" },
+    };
+
+    const out = openaiToOpenAIResponsesRequest("gpt-6-luna", body, true, null);
+    expect(out.tools.map((tool) => tool.name)).toEqual(["foo_bar", "foo_bar_2", "foo_bar_3"]);
+    expect(out.input.filter((item) => item.type === "function_call" || item.type === "custom_tool_call")
+      .map((item) => item.name)).toEqual(["foo_bar_2", "foo_bar_3"]);
+    expect(out.tool_choice).toEqual({ type: "function", name: "foo_bar_2" });
+    expect(out._toolNameMap.get("foo_bar_2")).toBe("foo.bar");
+    expect(out._toolNameMap.get("foo_bar_3")).toBe("foo/bar");
+  });
+
+  it("limits already-Responses tool and history names to 128 characters", () => {
+    const longName = "x".repeat(140);
+    const out = openaiToOpenAIResponsesRequest("gpt-6-luna", {
+      input: [{ type: "function_call", call_id: "call_long", name: longName, arguments: "{}" }],
+      tools: [{ type: "function", name: longName, parameters: { type: "object", properties: {} } }],
+      tool_choice: { type: "function", name: longName },
+    }, true, null);
+
+    expect(out.tools[0].name).toHaveLength(128);
+    expect(out.input[0].name).toBe(out.tools[0].name);
+    expect(out.tool_choice.name).toBe(out.tools[0].name);
+    expect(out._toolNameMap.get(out.tools[0].name)).toBe(longName);
+  });
+
+  it("keeps Chat tool declarations, call history, and choice on the same Responses aliases", () => {
+    const declaration = (name) => ({
+      type: "function",
+      function: { name, parameters: { type: "object", properties: {} } },
+    });
+    const body = {
+      messages: [{
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "call_dot", type: "function", function: { name: "foo.bar", arguments: "{}" } },
+          { id: "call_slash", type: "function", function: { name: "foo/bar", arguments: "{}" } },
+        ],
+      }],
+      tools: [declaration("foo_bar"), declaration("foo.bar"), declaration("foo/bar")],
+      tool_choice: { type: "function", function: { name: "foo.bar" } },
+    };
+
+    const out = openaiToOpenAIResponsesRequest("gpt-6-luna", body, true, null);
+    expect(out.tools.map((tool) => tool.name)).toEqual(["foo_bar", "foo_bar_2", "foo_bar_3"]);
+    expect(out.input.filter((item) => item.type === "function_call").map((item) => item.name))
+      .toEqual(["foo_bar_2", "foo_bar_3"]);
+    expect(out.tool_choice).toEqual({ type: "function", name: "foo_bar_2" });
+    expect(out._toolNameMap.get("foo_bar_2")).toBe("foo.bar");
+    expect(out._toolNameMap.get("foo_bar_3")).toBe("foo/bar");
   });
 
   it("does not introduce dots when expanding namespaced tools in openaiResponsesToOpenAIRequest", () => {
@@ -241,5 +307,98 @@ describe("OpenAI Responses tool name sanitization", () => {
     const nsTool = addTools.tools.find((t) => t.type === "namespace");
     expect(nsTool.tools[0].name).toMatch(OPENAI_TOOL_NAME_REGEX);
     expect(nsTool.tools[0].name).toBe("sub_tool");
+  });
+
+  it("normalizes native custom declarations, call history, and explicit choices together", () => {
+    const body = {
+      model: "gpt-6-luna",
+      input: [
+        { type: "custom_tool_call", call_id: "call_custom", name: "mcp.foo", input: "run" },
+        { type: "custom_tool_call_output", call_id: "call_custom", output: "ok" },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+      ],
+      tools: [
+        { type: "custom", name: "mcp.foo", format: { type: "text" } },
+        { type: "function", name: "mcp.bar", parameters: { type: "object", properties: {} } },
+      ],
+      tool_choice: { type: "function", name: "mcp.bar" },
+    };
+
+    new CodexExecutor().transformRequest("gpt-6-luna", body, true, {
+      connectionId: "test-conn",
+      providerSpecificData: {},
+    });
+
+    const tools = body.input.find((item) => item.type === "additional_tools").tools;
+    expect(tools.map((tool) => tool.name)).toEqual(["mcp_foo", "mcp_bar"]);
+    expect(body.input.find((item) => item.type === "custom_tool_call").name).toBe("mcp_foo");
+    expect(body.tool_choice).toEqual({ type: "function", name: "mcp_bar" });
+    const nameMap = takeRenamedToolNames(body);
+    expect(nameMap.get("mcp_foo")).toBe("mcp.foo");
+    expect(nameMap.get("mcp_bar")).toBe("mcp.bar");
+    expect(restoreToolNames({ output: [{ type: "custom_tool_call", name: "mcp_foo" }] }, nameMap).output[0].name)
+      .toBe("mcp.foo");
+  });
+
+  it("normalizes declarations already carried in a Lite additional_tools prefix", () => {
+    const body = {
+      model: "gpt-6-luna",
+      input: [
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [
+            { type: "custom", name: "mcp.foo", format: { type: "text" } },
+            {
+              type: "namespace",
+              name: "mcp.ns",
+              tools: [{ type: "function", name: "run.tool", parameters: { type: "object", properties: {} } }],
+            },
+          ],
+        },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "run" }] },
+      ],
+    };
+
+    new CodexExecutor().transformRequest("gpt-6-luna", body, true, {
+      connectionId: "test-conn",
+      providerSpecificData: {},
+    });
+
+    const tools = body.input.find((item) => item.type === "additional_tools").tools;
+    expect(tools[0].name).toBe("mcp_foo");
+    expect(tools[1].name).toBe("mcp_ns");
+    expect(tools[1].tools[0].name).toBe("run_tool");
+  });
+
+  it("keeps colliding native tool aliases distinct and preserves valid names", () => {
+    const body = {
+      model: "gpt-6-luna",
+      input: [
+        { type: "custom_tool_call", call_id: "call_dot", name: "foo.bar", input: "run" },
+        { type: "custom_tool_call_output", call_id: "call_dot", output: "ok" },
+        { type: "custom_tool_call", call_id: "call_slash", name: "foo/bar", input: "run" },
+        { type: "custom_tool_call_output", call_id: "call_slash", output: "ok" },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+      ],
+      tools: [
+        { type: "custom", name: "foo.bar", format: { type: "text" } },
+        { type: "function", name: "foo_bar", parameters: { type: "object", properties: {} } },
+        { type: "custom", name: "foo/bar", format: { type: "text" } },
+      ],
+    };
+
+    new CodexExecutor().transformRequest("gpt-6-luna", body, true, {
+      connectionId: "test-conn",
+      providerSpecificData: {},
+    });
+
+    const tools = body.input.find((item) => item.type === "additional_tools").tools;
+    expect(tools.map((tool) => tool.name)).toEqual(["foo_bar_2", "foo_bar", "foo_bar_3"]);
+    expect(body.input.filter((item) => item.type === "custom_tool_call").map((item) => item.name))
+      .toEqual(["foo_bar_2", "foo_bar_3"]);
+    const nameMap = takeRenamedToolNames(body);
+    expect(nameMap.get("foo_bar_2")).toBe("foo.bar");
+    expect(nameMap.get("foo_bar_3")).toBe("foo/bar");
   });
 });

@@ -3,7 +3,7 @@ import { FORMATS } from "../translator/formats.js";
 import { trackPendingRequest, appendRequestLog } from "@/lib/usageDb.js";
 import { extractUsage, mergeUsage, hasValidUsage, estimateUsage, logUsage, addBufferToUsage, filterUsageForFormat, COLORS } from "./usageTracking.js";
 import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE } from "./streamHelpers.js";
-import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, hasActionableResponsesOutput, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
+import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, hasActionableResponsesOutput, hasInvalidResponsesToolCalls, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
 
 import { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER } from "./sseConstants.js";
@@ -86,6 +86,7 @@ export function createSSEStream(options = {}) {
   let currentOpenAIResponsesEvent = null;
   let openAIResponsesTerminalSeen = false;
   let openAIResponsesHasOutput = false;
+  let openAIResponsesHasInvalidCall = false;
   let openAIResponsesDoneSent = false;
   let streamDoneSent = false;  // track duplicate [DONE] across transform + flush
   let finalized = false;
@@ -96,16 +97,20 @@ export function createSSEStream(options = {}) {
       && typeof chunk.delta === "string" && chunk.delta.trim()) {
       openAIResponsesHasOutput = true;
     }
-    if (eventName === "response.output_item.done"
-      && hasActionableResponsesOutput([chunk.item])) {
-      openAIResponsesHasOutput = true;
+    if (eventName === "response.output_item.done") {
+      if (hasInvalidResponsesToolCalls([chunk.item])) openAIResponsesHasInvalidCall = true;
+      if (hasActionableResponsesOutput([chunk.item])) openAIResponsesHasOutput = true;
     }
 
-    const emptyCompletion = (
+    const completedEvent = (
       eventName === "response.completed"
       || (eventName === "response.done" && chunk.response?.status === "completed")
-    ) && !openAIResponsesHasOutput && !hasActionableResponsesOutput(chunk.response?.output);
-    if (!emptyCompletion) {
+    );
+    const invalidCompletion = completedEvent
+      && (openAIResponsesHasInvalidCall || hasInvalidResponsesToolCalls(chunk.response?.output));
+    const emptyCompletion = completedEvent
+      && !openAIResponsesHasOutput && !hasActionableResponsesOutput(chunk.response?.output);
+    if (!invalidCompletion && !emptyCompletion) {
       return formatSSE({ event: eventName, data: chunk }, FORMATS.OPENAI_RESPONSES);
     }
     return formatSSE({
@@ -115,7 +120,11 @@ export function createSSEStream(options = {}) {
         response: {
           ...chunk.response,
           status: "failed",
-          error: {
+          error: invalidCompletion ? {
+            type: "upstream_error",
+            code: "invalid_tool_call",
+            message: "upstream returned a tool call without a valid ID or name"
+          } : {
             type: "upstream_error",
             code: "empty_output",
             message: "upstream finished without assistant text or a tool call"

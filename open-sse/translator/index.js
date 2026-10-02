@@ -288,6 +288,7 @@ export function initState(sourceFormat) {
       funcArgsBuf: {},
       funcNames: {},
       funcCallIds: {},
+      seenFuncIndices: new Set(),
       funcItemAdded: {},
       funcArgsDone: {},
       funcItemDone: {},

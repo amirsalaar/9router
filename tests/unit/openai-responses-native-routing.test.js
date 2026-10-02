@@ -76,4 +76,25 @@ describe("Codex CLI native Responses routing", () => {
     expect(wire).toContain("event: response.completed");
     expect(wire).not.toContain("event: response.failed");
   });
+
+  it("fails a native completion that mixes answer text with a malformed custom call", async () => {
+    const wire = await routeCodexSSE([
+      { type: "response.created", response: { id: "resp_mixed", status: "in_progress" } },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] },
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 1,
+        item: { type: "custom_tool_call", call_id: "call_bad", name: "", input: "run" },
+      },
+      { type: "response.completed", response: { id: "resp_mixed", status: "completed" } },
+    ]);
+
+    expect(wire).toContain("event: response.failed");
+    expect(wire).toContain('"code":"invalid_tool_call"');
+    expect(wire).not.toContain("event: response.completed");
+  });
 });

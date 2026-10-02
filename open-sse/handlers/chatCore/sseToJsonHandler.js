@@ -5,9 +5,9 @@ import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
 import { responsesIncompleteToOpenAIFinish } from "../../translator/concerns/finishReason.js";
 import { PROVIDERS } from "../../config/providers.js";
-import { hasActionableResponsesOutput } from "../../utils/responsesStreamHelpers.js";
+import { hasActionableResponsesOutput, hasInvalidResponsesToolCalls } from "../../utils/responsesStreamHelpers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
-import { ROLE, RESPONSES_ITEM, OPENAI_FINISH } from "../../translator/schema/index.js";
+import { ROLE, RESPONSES_ITEM, OPENAI_BLOCK, OPENAI_FINISH } from "../../translator/schema/index.js";
 
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
@@ -68,13 +68,6 @@ function extractCustomToolInput(argumentsValue) {
 function hasValidToolIdentity(id, name) {
   return typeof id === "string" && id.trim().length > 0
     && typeof name === "string" && name.trim().length > 0;
-}
-
-function hasValidResponsesToolCalls(output) {
-  return !Array.isArray(output) || output.every((item) =>
-    (item?.type !== RESPONSES_ITEM.FUNCTION_CALL && item?.type !== RESPONSES_ITEM.CUSTOM_TOOL_CALL)
-      || hasValidToolIdentity(item.call_id, item.name)
-  );
 }
 
 export function hasActionableChatOutput(choice) {
@@ -261,7 +254,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
           jsonResponse.error?.message || "Upstream Responses stream failed"
         );
       }
-      if (!hasValidResponsesToolCalls(jsonResponse.output)) {
+      if (hasInvalidResponsesToolCalls(jsonResponse.output)) {
         appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
         return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Upstream returned a tool call without a valid ID or name");
       }
@@ -314,14 +307,18 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         : {};
       let finalResp;
 
-      // Extract tool calls from Responses API output (function_call items)
-      const funcCallItems = (jsonResponse.output || []).filter(item => item.type === "function_call");
-      const toolCalls = funcCallItems.map((item, idx) => ({
+      // Chat tool calls represent both Responses function and freeform custom calls.
+      const toolCallItems = (jsonResponse.output || []).filter(item =>
+        item?.type === RESPONSES_ITEM.FUNCTION_CALL || item?.type === RESPONSES_ITEM.CUSTOM_TOOL_CALL
+      );
+      const toolCalls = toolCallItems.map((item, idx) => ({
         id: item.call_id || `call_${item.name}_${Date.now()}_${idx}`,
-        type: "function",
+        type: OPENAI_BLOCK.FUNCTION,
         function: {
           name: item.name,
-          arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments || {})
+          arguments: item.type === RESPONSES_ITEM.CUSTOM_TOOL_CALL
+            ? JSON.stringify({ input: typeof item.input === "string" ? item.input : JSON.stringify(item.input ?? "") })
+            : typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments || {})
         }
       }));
       const hasToolCalls = toolCalls.length > 0;

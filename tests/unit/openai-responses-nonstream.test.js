@@ -628,6 +628,30 @@ describe("forced-SSE JSON path for a Responses-API client behind a chat upstream
     expect(json.choices[0].finish_reason).toBe("stop");
   });
 
+  it("returns a native custom tool call to a Chat JSON client", async () => {
+    const input = "return await tools.shell({ command: 'pwd' });";
+    const raw = nativeSSE([{
+      type: "response.completed",
+      response: {
+        id: "resp_custom_chat",
+        status: "completed",
+        output: [{ type: "custom_tool_call", call_id: "call_exec", name: "exec", input }],
+      },
+    }]);
+
+    const result = await handleForcedSSEToJson(
+      sseCtx(FORMATS.OPENAI, FORMATS.OPENAI_RESPONSES, raw)
+    );
+    expect(result.success).toBe(true);
+    const json = await result.response.json();
+    expect(json.choices[0].message.tool_calls).toEqual([{
+      id: "call_exec",
+      type: "function",
+      function: { name: "exec", arguments: JSON.stringify({ input }) },
+    }]);
+    expect(json.choices[0].finish_reason).toBe("tool_calls");
+  });
+
   it("rejects a native Responses stream that closes without a terminal event", async () => {
     const raw = nativeSSE([
       { type: "response.created", response: { id: "resp_cut", status: "in_progress" } },
