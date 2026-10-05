@@ -652,7 +652,37 @@ export async function GET(request) {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
     const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
-    return Response.json({ object: "list", data }, {
+
+    // Format models array for Codex CLI / Desktop model catalog parser
+    const codexModels = [];
+    const seenSlugs = new Set();
+    const addCodexModel = (slug, m) => {
+      if (!slug || seenSlugs.has(slug)) return;
+      seenSlugs.add(slug);
+      const ctx = m.context_length || m.capabilities?.contextWindow || 272000;
+      // Auto-compact at 75% to keep sufficient headroom before hard provider limits
+      const compactLimit = Math.floor(ctx * 0.75);
+      codexModels.push({
+        slug,
+        id: slug,
+        display_name: slug,
+        context_window: ctx,
+        max_context_window: ctx,
+        auto_compact_token_limit: compactLimit,
+        visibility: "list",
+        supported_in_api: true,
+        priority: 1,
+      });
+    };
+
+    for (const m of data) {
+      addCodexModel(m.id, m);
+      if (typeof m.id === "string" && m.id.includes("/")) {
+        addCodexModel(m.id.slice(m.id.indexOf("/") + 1), m);
+      }
+    }
+
+    return Response.json({ object: "list", data, models: codexModels }, {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
   } catch (error) {
