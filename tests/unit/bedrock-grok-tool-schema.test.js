@@ -24,3 +24,9 @@ describe("Bedrock Grok tool schema", () => {
     });
   });
 });
+
+  it("drops parallel_tool_calls when no tools are sent", () => {
+    const body = sanitizeBedrockGrokTools({ parallel_tool_calls: true, tools: [] });
+    expect(body.parallel_tool_calls).toBeUndefined();
+    expect(body.tools).toBeUndefined();
+  });

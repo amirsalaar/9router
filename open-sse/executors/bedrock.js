@@ -26,7 +26,11 @@ function sanitizeBedrockGrokSchema(value) {
 }
 
 export function sanitizeBedrockGrokTools(body) {
-  if (!Array.isArray(body?.tools)) return body;
+  if (!Array.isArray(body?.tools) || body.tools.length === 0) {
+    delete body.tools;
+    delete body.parallel_tool_calls;
+    return body;
+  }
   body.tools = body.tools.map((tool) => {
     const parameters = tool?.function?.parameters;
     if (!parameters || typeof parameters !== "object") return tool;
