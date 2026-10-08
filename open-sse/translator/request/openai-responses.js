@@ -11,6 +11,7 @@ import {
   clampResponsesCallId,
   coerceResponsesArguments,
   coerceResponsesOutput,
+  extractResponsesToolOutputImages,
 } from "../formats/responsesApi.js";
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM } from "../schema/index.js";
 
@@ -45,6 +46,7 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
   let pendingReasoningEncrypted = "";
   const additionalTools = [];
   const customToolNames = new Set();
+  const toolCallNames = new Map();
 
   const inputItems = normalizeResponsesInput(body.input);
   if (!inputItems) return body;
@@ -119,6 +121,9 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
         };
         attachPendingReasoning(currentAssistantMsg);
       }
+      if (item.call_id && item.name) {
+        toolCallNames.set(item.call_id, item.name);
+      }
       // Skip items with empty/missing name — Codex/OpenAI reject nameless tool calls (#444)
       if (!item.name || typeof item.name !== "string" || item.name.trim() === "") continue;
       if (itemType === RESPONSES_ITEM.CUSTOM_TOOL_CALL) customToolNames.add(item.name);
@@ -147,12 +152,20 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
         }
         pendingToolResults = [];
       }
+      const toolName = item.name || toolCallNames.get(item.call_id) || "";
+      const { content, images } = extractResponsesToolOutputImages(item.output, toolName);
       // Add tool result immediately
       result.messages.push({
         role: ROLE.TOOL,
         tool_call_id: item.call_id,
-        content: typeof item.output === "string" ? item.output : JSON.stringify(item.output)
+        content
       });
+      if (images.length > 0) {
+        result.messages.push({
+          role: ROLE.USER,
+          content: images
+        });
+      }
     }
     else if (itemType === RESPONSES_ITEM.ADDITIONAL_TOOLS) {
       if (Array.isArray(item.tools)) additionalTools.push(...item.tools);

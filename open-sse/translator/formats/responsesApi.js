@@ -77,6 +77,96 @@ export function coerceResponsesOutput(value) {
 }
 
 /**
+ * Extract image parts from a tool call output and return clean text content for
+ * role: "tool" plus extracted Chat Completions image parts for role: "user".
+ * Many Chat Completions providers (e.g. Bedrock Grok) reject non-string tool content
+ * with HTTP 400 and crash with 500 internalServerException if giant base64 image JSON
+ * is stringified inside role: "tool". Images belong in role: "user" messages.
+ */
+export function extractResponsesToolOutputImages(rawOutput, toolName = "") {
+  let parsed = rawOutput;
+  if (typeof rawOutput === "string") {
+    const trimmed = rawOutput.trim();
+    if (
+      (trimmed.startsWith("[") || trimmed.startsWith("{")) &&
+      (trimmed.includes("input_image") || trimmed.includes("image_url"))
+    ) {
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        parsed = rawOutput;
+      }
+    }
+  }
+
+  const items = Array.isArray(parsed)
+    ? parsed
+    : (parsed && typeof parsed === "object" ? [parsed] : null);
+
+  if (!items) {
+    return {
+      content: typeof rawOutput === "string" ? rawOutput : JSON.stringify(rawOutput ?? ""),
+      images: [],
+    };
+  }
+
+  const images = [];
+  const textParts = [];
+  let foundImage = false;
+
+  for (const part of items) {
+    if (!part || typeof part !== "object") {
+      textParts.push(String(part ?? ""));
+      continue;
+    }
+
+    if (part.type === RESPONSES_ITEM.INPUT_IMAGE || part.type === OPENAI_BLOCK.IMAGE_URL) {
+      foundImage = true;
+      let url = "";
+      let detail = "auto";
+      if (typeof part.image_url === "string") {
+        url = part.image_url;
+      } else if (part.image_url && typeof part.image_url === "object") {
+        url = part.image_url.url || "";
+        if (part.image_url.detail) detail = part.image_url.detail;
+      } else if (part.file_id) {
+        url = part.file_id;
+      }
+      if (part.detail) detail = part.detail;
+
+      if (url) {
+        images.push({
+          type: OPENAI_BLOCK.IMAGE_URL,
+          image_url: { url, detail },
+        });
+      }
+    } else if (
+      part.type === RESPONSES_ITEM.INPUT_TEXT ||
+      part.type === RESPONSES_ITEM.OUTPUT_TEXT ||
+      part.type === OPENAI_BLOCK.TEXT
+    ) {
+      textParts.push(part.text ?? "");
+    } else {
+      textParts.push(typeof part === "string" ? part : JSON.stringify(part));
+    }
+  }
+
+  if (!foundImage) {
+    return {
+      content: typeof rawOutput === "string" ? rawOutput : JSON.stringify(rawOutput ?? ""),
+      images: [],
+    };
+  }
+
+  let textContent = textParts.filter(Boolean).join("\n").trim();
+  if (!textContent) {
+    textContent = toolName ? `[image: ${toolName} result]` : "[image: tool result]";
+  }
+
+  return { content: textContent, images };
+}
+
+/**
  * Convert OpenAI Responses API format to standard chat completions format
  * Responses API uses: { input: [...], instructions: "..." }
  * Chat API uses: { messages: [...] }
@@ -96,6 +186,7 @@ export function convertResponsesApiFormat(body) {
   let currentAssistantMsg = null;
   let pendingToolCalls = [];
   let pendingToolResults = [];
+  const toolCallNames = new Map();
 
   const inputItems = normalizeResponsesInput(body.input);
   if (!inputItems) return body;
@@ -142,6 +233,9 @@ export function convertResponsesApiFormat(body) {
           tool_calls: []
         };
       }
+      if (item.call_id && item.name) {
+        toolCallNames.set(item.call_id, item.name);
+      }
       // Skip items with empty/missing name — upstream APIs reject nameless tool calls (#444)
       if (!item.name || typeof item.name !== "string" || item.name.trim() === "") continue;
       currentAssistantMsg.tool_calls.push({
@@ -159,12 +253,20 @@ export function convertResponsesApiFormat(body) {
         result.messages.push(currentAssistantMsg);
         currentAssistantMsg = null;
       }
+      const toolName = item.name || toolCallNames.get(item.call_id) || "";
+      const { content, images } = extractResponsesToolOutputImages(item.output, toolName);
       // Add tool result
       pendingToolResults.push({
         role: ROLE.TOOL,
         tool_call_id: item.call_id,
-        content: typeof item.output === "string" ? item.output : JSON.stringify(item.output)
+        content
       });
+      if (images.length > 0) {
+        pendingToolResults.push({
+          role: ROLE.USER,
+          content: images
+        });
+      }
     }
     else if (itemType === RESPONSES_ITEM.REASONING) {
       // Skip reasoning items - they are for display only
